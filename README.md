@@ -89,6 +89,7 @@ await result.download({ format: 'jpg', filename: 'card.jpg' });
 - [Contributors](#contributors)
 - [Sponsors](#sponsors)
 - [Show your support](#show-your-support)
+- [Acknowledgments](#acknowledgments)
 - [License](#license)
 
 ## Installation
@@ -435,6 +436,10 @@ SnapDOM runs in production across 250+ public repositories ([GitHub dependents g
 - [SnapDIFF](https://zumerlab.com/snapdiff/): in-browser visual regression testing *(by Zumerlab)*
 
 See the full gallery at **[snapdom.dev/made-with](https://snapdom.dev/made-with/)**. Shipping SnapDOM? [Open a PR](https://github.com/zumerlab/snapdom/pulls) to add your project. Real, verifiable projects only.
+
+## Acknowledgments
+
+Thanks to [Anthropic](https://claude.com/contact-sales/claude-for-oss) and [OpenAI](https://openai.com/form/codex-for-oss/) for supporting my open-source work by providing premium access to Claude and ChatGPT.
 
 ## License
 
