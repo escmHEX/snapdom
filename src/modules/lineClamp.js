@@ -1,212 +1,116 @@
-// src/core/lineClamp.js
+const snapshots = new WeakMap()
+let graphemes
 
-/**
- * Bake text truncation for the element AND all descendants that CSS would
- * truncate: multi-line `-webkit-line-clamp` and single-line
- * `text-overflow: ellipsis`. Firefox and Safari don't honour either inside a
- * `<foreignObject>`, so we resolve the ellipsis into the text up front.
- * Fixes #386 (nested clamp) and #431 (single-line ellipsis on Safari/Firefox).
- *
- * @param {Element} el - Root element (and its subtree) to process
- * @param {{left:number,top:number,right:number,bottom:number}|null} [clipRect] - Clip mode:
- *   prune subtrees painting entirely outside this viewport-coords window (their clamp work
- *   is discarded with the culled clone anyway).
- * @returns {() => void} Combined undo function
+/** Capture only truncation candidates while computed styles and source text agree.
+ * CSSStyleDeclaration is live, so retaining it across cloning awaits is not enough.
+ * @param {Element} source
+ * @param {Element} clone
+ * @param {CSSStyleDeclaration} cs
  */
-export function lineClampTree(el, clipRect) {
-  if (!el) return () => {}
-  const undos = []
-  const M = 200
-  function walk(node) {
-    if (clipRect) {
-      const r = node.getBoundingClientRect()
-      if (r.width > 0 || r.height > 0) {
-        const right = Math.max(r.right, r.left + (node.scrollWidth || 0))
-        const bottom = Math.max(r.bottom, r.top + (node.scrollHeight || 0))
-        if (right < clipRect.left - M || r.left > clipRect.right + M ||
-            bottom < clipRect.top - M || r.top > clipRect.bottom + M) return
+export function snapshotTextTruncation(source, clone, cs) {
+  const lines = parseInt(cs.getPropertyValue('-webkit-line-clamp') || cs.getPropertyValue('line-clamp'), 10) || 0
+  const single = cs.textOverflow === 'ellipsis' &&
+    (cs.whiteSpace === 'nowrap' || cs.whiteSpace === 'pre') &&
+    (cs.overflowX === 'hidden' || cs.overflowX === 'clip')
+  if (!(lines > 0 || single) || source.childElementCount > 0) return
+  const textNodes = Array.from(source.childNodes).filter(n => n.nodeType === 3)
+  if (!textNodes.length || !source.clientWidth) return
+  if (!lines && source.scrollWidth <= source.clientWidth + 0.5) return
+  const style = source.ownerDocument.createElement('div').style
+  for (let i = 0; i < cs.length; i++) {
+    const prop = cs[i]
+    style.setProperty(prop, cs.getPropertyValue(prop))
+  }
+  // Preserve the resolved content width, independent of flex/grid/ancestor layout.
+  const pad = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0)
+  const border = (parseFloat(cs.borderLeftWidth) || 0) + (parseFloat(cs.borderRightWidth) || 0)
+  const width = parseFloat(cs.width)
+  style.width = Number.isFinite(width) ? cs.width :
+    `${source.clientWidth + (cs.boxSizing === 'border-box' ? border : -pad)}px`
+  snapshots.set(clone, { css: style.cssText, text: textNodes.map(n => n.data).join(''), lines, single })
+}
+
+/** Bake truncation on capture-owned nodes, using one lazily mounted isolated measurer.
+ * Never rewrites source text/styles. The temporary host is outside ordinary
+ * capture subtrees; full body/document captures necessarily contain that host.
+ * @param {Element} cloneRoot
+ * @param {Map<Node, Node>} nodeMap clone to source map for this capture
+ */
+export function lineClampTree(cloneRoot, nodeMap, classCSS = '') {
+  let host
+  let shadow
+  try {
+    for (const clone of nodeMap.keys()) {
+      const snapshot = snapshots.get(clone)
+      if (!snapshot || !(clone === cloneRoot || cloneRoot.contains(clone))) continue
+      if (!host) {
+        const doc = cloneRoot.ownerDocument
+        host = doc.createElement('div')
+        host.setAttribute('data-snapdom-internal', '')
+        host.style.cssText = 'all:initial!important;position:fixed!important;left:-100000px!important;top:0!important;visibility:hidden!important;pointer-events:none!important;'
+        shadow = host.attachShadow({ mode: 'open' })
+        const styles = doc.createElement('style')
+        styles.textContent = classCSS
+        shadow.appendChild(styles)
+        doc.body.appendChild(host)
       }
+      // The prepared clone includes styled pseudo-elements. They consume space
+      // alongside text and must participate in the same isolated measurement.
+      const measure = clone.cloneNode(true)
+      measure.style.cssText = snapshot.css
+      // Release height constraints for scrollHeight measurement, keeping the font
+      // strut and -webkit-box layout that determine the actual line height (#443).
+      for (const [prop, value] of Object.entries({ position: 'static', float: 'none', margin: '0', transform: 'none', zoom: '1', height: 'auto', 'min-height': '0', 'max-height': 'none', 'min-width': '0', 'max-width': 'none', animation: 'none', transition: 'none' })) {
+        measure.style.setProperty(prop, value, 'important')
+      }
+      const textNodes = Array.from(measure.childNodes).filter(node => node.nodeType === 3)
+      const write = value => {
+        textNodes[0].data = value
+        for (let i = 1; i < textNodes.length; i++) textNodes[i].data = ''
+      }
+      write(snapshot.text)
+      shadow.appendChild(measure)
+      const cs = measure.style
+      const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0)
+      let targetH = Infinity
+      if (snapshot.lines > 0) {
+        write('X')
+        const lineH = measure.scrollHeight - pad
+        targetH = Math.round(lineH * snapshot.lines + pad)
+        write(snapshot.text)
+      }
+      const fits = () => measure.scrollHeight <= targetH + 0.5 &&
+        (!snapshot.single || measure.scrollWidth <= measure.clientWidth + 0.5)
+      let result = snapshot.text
+      if (!fits()) {
+        const ends = [0]
+        if (typeof Intl.Segmenter === 'function') {
+          graphemes ||= new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+          for (const { index, segment } of graphemes.segment(snapshot.text)) ends.push(index + segment.length)
+        } else {
+          // Firefox before 125 has no Segmenter. Keep capture available and never
+          // cut a surrogate pair; full grapheme boundaries use the native API.
+          for (const point of snapshot.text) ends.push(ends[ends.length - 1] + point.length)
+        }
+        let lo = 0, hi = ends.length - 1, best = 0
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1
+          write(snapshot.text.slice(0, ends[mid]) + '…')
+          if (fits()) { best = mid; lo = mid + 1 } else { hi = mid - 1 }
+        }
+        result = snapshot.text.slice(0, ends[best]) + '…'
+      }
+      // Preserve any generated pseudo-element children in the output clone.
+      let written = false
+      for (const node of clone.childNodes) {
+        if (node.nodeType !== 3) continue
+        node.data = written ? '' : result
+        written = true
+      }
+      measure.remove()
+      snapshots.delete(clone)
     }
-    // One computed-style read per node, shared by both passes (hot path).
-    const cs = getComputedStyle(node)
-    const u1 = lineClamp(node, cs)
-    if (u1) undos.push(u1)
-    const u2 = textEllipsis(node, cs)
-    if (u2) undos.push(u2)
-    for (const child of node.children || []) walk(child)
+  } finally {
+    host?.remove()
   }
-  walk(el)
-  return () => undos.forEach((u) => u())
-}
-
-/**
- * Apply a multi-line ellipsis ONLY if the target element declares
- * -webkit-line-clamp/line-clamp. Uses the real layout (scrollHeight) and
- * mutates the ORIGINAL node briefly (binary search on text + '…'),
- * then returns an undo() that restores everything right after cloning.
- *
- * @param {Element} el
- * @param {CSSStyleDeclaration} [cs]
- * @returns {() => void} undo function (no-op if nothing changed)
- */
-export function lineClamp(el, cs) {
-  if (!el) return () => {}
-  cs = cs || getComputedStyle(el)
-
-  const lines = getClamp(cs)
-  if (lines <= 0) return () => {}
-
-  if (!isPlainTextContainer(el)) return () => {}
-
-  // Mutates the live element's text nodes in place (never textContent, #485).
-  const text = textNodeWriter(el)
-  const original = text.text
-
-  // Measure the REAL rendered line height instead of guessing from CSS.
-  // `line-height: normal` is font-metric dependent, and inside a -webkit-box the
-  // line box never shrinks below the font strut, so a value smaller than the
-  // glyph height (e.g. line-height:18px on 20px text) still lays out taller. A
-  // fs*1.2 / raw-CSS guess mis-sizes targetH and clamps to the wrong line count (#443).
-  const pad = vpad(cs)
-  text.write('X')
-  const perLine = el.scrollHeight - pad
-  text.restore()
-  const lineH = perLine > 0 ? perLine : usedLineHeightPx(cs)
-  const targetH = Math.round(lineH * lines + pad)
-
-  // Si ya entra completo en N líneas, no hacemos nada (igual que el clamp nativo)
-  if (el.scrollHeight <= targetH + 0.5) {
-    return () => {}
-  }
-
-  // ==== Binary search sobre el largo del prefijo que entra con ellipsis ====
-  let lo = 0, hi = original.length, best = -1
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1
-    text.write(original.slice(0, mid) + '…')
-    // Forzamos layout leyendo scrollHeight
-    if (el.scrollHeight <= targetH + 0.5) {
-      best = mid; lo = mid + 1
-    } else {
-      hi = mid - 1
-    }
-  }
-
-  // Aplica el mejor corte (si nada entra, queda solo '…')
-  text.write((best >= 0 ? original.slice(0, best) : '') + '…')
-
-  // Devuelve undo() para restaurar el DOM original tras clonar
-  return () => {
-    text.restore()
-  }
-}
-
-/**
- * Bake a single-line `text-overflow: ellipsis`. Same strategy as lineClamp but
- * on the horizontal axis: only when the element is a nowrap, overflow-clipped
- * plain-text container whose content overflows. Firefox/Safari skip this in a
- * <foreignObject>, so we resolve it here for every engine (#431).
- *
- * @param {Element} el
- * @param {CSSStyleDeclaration} [cs]
- * @returns {() => void} undo function (no-op if nothing changed)
- */
-export function textEllipsis(el, cs) {
-  if (!el) return () => {}
-  cs = cs || getComputedStyle(el)
-
-  if (cs.textOverflow !== 'ellipsis') return () => {}
-  // Single-line ellipsis: content must not wrap and must be clipped.
-  if (cs.whiteSpace !== 'nowrap' && cs.whiteSpace !== 'pre') return () => {}
-  if (cs.overflowX !== 'hidden' && cs.overflowX !== 'clip') return () => {}
-
-  if (!isPlainTextContainer(el)) return () => {}
-
-  // Ya entra completo → el clamp nativo tampoco haría nada.
-  if (el.scrollWidth <= el.clientWidth + 0.5) return () => {}
-
-  // Mutates the live element's text nodes in place (never textContent, #485).
-  const text = textNodeWriter(el)
-  const original = text.text
-
-  let lo = 0, hi = original.length, best = -1
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1
-    text.write(original.slice(0, mid) + '…')
-    if (el.scrollWidth <= el.clientWidth + 0.5) {
-      best = mid; lo = mid + 1
-    } else {
-      hi = mid - 1
-    }
-  }
-
-  text.write((best >= 0 ? original.slice(0, best) : '') + '…')
-
-  return () => {
-    text.restore()
-  }
-}
-
-/**
- * Rewrites an element's text WITHOUT replacing its text nodes.
- *
- * `el.textContent = value` is destructive: the browser drops every child node and inserts a fresh
- * text node. Frameworks that keep a reference to the original node (React fibers, Vue vnodes,
- * Svelte blocks) then fail on their next update with
- * `NotFoundError: Failed to execute 'removeChild'` — long after the capture, which makes it very
- * hard to trace back (#485). Writing `node.data` mutates the same node in place, exactly what
- * React itself does for a single-text-child update, so node identity survives the measurement.
- *
- * Callers are gated by isPlainTextContainer(), so the element has no element children: writing
- * the whole string into the first text node and blanking the rest lays out identically to a
- * textContent write, and restore() puts every original chunk back where it was.
- *
- * @param {Element} el
- * @returns {{text: string, write: (value: string) => void, restore: () => void}}
- */
-function textNodeWriter(el) {
-  const nodes = []
-  for (let n = el.firstChild; n; n = n.nextSibling) {
-    if (n.nodeType === Node.TEXT_NODE) nodes.push(n)
-  }
-  const original = nodes.map((n) => n.data)
-  return {
-    text: original.join(''),
-    write(value) {
-      nodes[0].data = value
-      for (let i = 1; i < nodes.length; i++) nodes[i].data = ''
-    },
-    restore() {
-      for (let i = 0; i < nodes.length; i++) nodes[i].data = original[i]
-    },
-  }
-}
-
-/* ---------------- helpers: idénticos a tu snippet ---------------- */
-
-function getClamp(cs) {
-  let v = cs.getPropertyValue('-webkit-line-clamp') || cs.getPropertyValue('line-clamp')
-  v = (v || '').trim()
-  const n = parseInt(v, 10)
-  return Number.isFinite(n) && n > 0 ? n : 0
-}
-
-function usedLineHeightPx(cs) {
-  const lh = (cs.lineHeight || '').trim()
-  const fs = parseFloat(cs.fontSize) || 16
-  if (!lh || lh === 'normal') return Math.round(fs * 1.2)
-  if (lh.endsWith('px')) return parseFloat(lh)
-  if (/^\d+(\.\d+)?$/.test(lh)) return Math.round(parseFloat(lh) * fs)
-  if (lh.endsWith('%')) return Math.round((parseFloat(lh) / 100) * fs)
-  return Math.round(fs * 1.2)
-}
-
-function vpad(cs) {
-  return (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0)
-}
-
-/** Plain text container: sin hijos element, sólo nodos de texto/espacios. */
-function isPlainTextContainer(el) {
-  if (el.childElementCount > 0) return false
-  return Array.from(el.childNodes).some(n => n.nodeType === Node.TEXT_NODE)
 }

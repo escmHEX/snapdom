@@ -157,8 +157,8 @@ export async function captureDOM(element, options) {
 
   // BEFORECLONE
   await runHook('beforeClone', state)
-  const undoClamp = lineClampTree(state.element, preClipRect)
-  try {
+
+  {
     // Keep this capture's own clone→source map: nested iframe captures reassign
     // cache.session.nodeMap concurrently (see rasterizeIframe), so the global cannot be
     // trusted after the clone phase — every later pass must use this reference.
@@ -185,9 +185,8 @@ export async function captureDOM(element, options) {
       // `zoom` carried over by cloneNode() would shrink the content and leave blank bands.
       neutralizeRootZoom(state.element, clone)
     }
-  } finally {
-    undoClamp()
   }
+  lineClampTree(clone, nodeMap, classCSS)
 
   // AFTERCLONE
   state = { clone, classCSS, styleCache, nodeMap, ...state }

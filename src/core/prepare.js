@@ -12,6 +12,7 @@ import { resolveBlobUrlsInTree } from '../utils/clone.helpers.js'
 import { stabilizeLayout, forceContentVisibility } from '../utils/prepare.helpers.js'
 import { resolveClipRect, freezeViewportPositioned } from '../utils/capture.helpers.js'
 import { nextFrame } from '../utils/browser.js'
+import { preserveScrollLayout } from '../modules/scroll.js'
 
 const visibilityWarmups = new Set()
 
@@ -259,8 +260,8 @@ export async function prepareClone(element, options = {}) {
   // what the user sees) and whenever the capture root is itself scrolled (stuck stickies
   // must freeze where they're stuck: header/footer/left-sidebar, horizontal included).
   // Must run after class application (the sticky placeholder inherits the twin's class)
-  // and BEFORE the scrolled-container wrapper below — its fixed/absolute adjustment
-  // (+scrollY) is what cancels the wrapper's translate for these now-absolute elements.
+  // and BEFORE the scrolled-container wrapper below, which leaves frozen boxes
+  // outside its translated content viewport.
   if ((sessionCache.clip || element.scrollTop || element.scrollLeft) && clone?.nodeType === 1) {
     try {
       const edge = sessionCache.clip && clipWindow ? { x: clipWindow.x, y: clipWindow.y } : { x: 0, y: 0 }
@@ -275,49 +276,7 @@ export async function prepareClone(element, options = {}) {
     // scroll — un-scrolling the root here would compensate twice (blank output when
     // capturing a scrolled documentElement).
     if (sessionCache.clip && originalNode === element) continue
-    const scrollX = originalNode.scrollLeft
-    const scrollY = originalNode.scrollTop
-    const hasScroll = scrollX || scrollY
-    // Realm-safe HTML check: iframe-realm clones are not instances of this window's
-    // HTMLElement, but their scroll still needs compensating.
-    if (hasScroll && cloneNode?.nodeType === 1 && cloneNode.namespaceURI === 'http://www.w3.org/1999/xhtml') {
-      cloneNode.style.overflow = 'hidden'
-      cloneNode.style.scrollbarWidth = 'none'
-      cloneNode.style.msOverflowStyle = 'none'
-
-      // #364: Before wrapping with translate, adjust fixed/absolute descendants
-      // so they don't shift when the translate wrapper creates a new containing block.
-      try {
-        const positioned = cloneNode.querySelectorAll('*')
-        for (const child of positioned) {
-          if (child.nodeType !== 1 || child.namespaceURI !== 'http://www.w3.org/1999/xhtml') continue
-          const pos = child.style.position
-          if (pos === 'fixed' || pos === 'absolute') {
-            const curTop = parseFloat(child.style.top) || 0
-            const curLeft = parseFloat(child.style.left) || 0
-            child.style.top = `${curTop + scrollY}px`
-            child.style.left = `${curLeft + scrollX}px`
-            if (pos === 'fixed') child.style.position = 'absolute'
-          }
-        }
-      } catch { /* non-blocking */ }
-
-      const inner = document.createElement('div')
-      // #413: baseCSS emits a `div{white-space:normal;font-family:…}` rule (from the tag's
-      // all:initial defaults) that directly targets this wrapper and overrides the inherited
-      // text formatting of the scrolled element (e.g. a <pre>'s pre-wrap/monospace). `all:unset`
-      // lets inherited props flow from the parent again (inline style beats the type selector)
-      // while keeping non-inherited props at initial, so the wrapper stays visually transparent.
-      inner.style.all = 'unset'
-      inner.style.transform = `translate(${-scrollX}px, ${-scrollY}px)`
-      inner.style.willChange = 'transform'
-      inner.style.display = 'inline-block'
-      inner.style.width = '100%'
-      while (cloneNode.firstChild) {
-        inner.appendChild(cloneNode.firstChild)
-      }
-      cloneNode.appendChild(inner)
-    }
+    preserveScrollLayout(cloneNode, originalNode, sessionCache.styleCache, sessionCache.nodeMap)
   }
   if (element === sessionCache.nodeMap.get(clone)) {
     const computed = sessionCache.styleCache.get(element) || getStyle(element)

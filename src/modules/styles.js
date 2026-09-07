@@ -1,3 +1,4 @@
+import { snapshotTextTruncation } from './lineClamp.js'
 import { getStyleKey, softensWidth, softenNeedsAutoWidth, shouldIgnoreProp, getStyle } from '../utils/index.js'
 import { cache } from '../core/cache.js'
 
@@ -422,6 +423,7 @@ export async function inlineAllStyles(source, clone, sessionOrCtx, opts) {
     session.styleCache.set(source, computed || getComputedStyle(document.documentElement))
   }
   const pre = session.styleCache.get(source)
+  snapshotTextTruncation(source, clone, pre)
 
   // Replace authored inline style with computed values so !important in stylesheets
   // correctly overrides inline styles in the clone (fixes #328)

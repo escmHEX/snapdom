@@ -11,7 +11,7 @@ import {
 } from './transforms.helpers.js'
 
 const HTML_NS = 'http://www.w3.org/1999/xhtml'
-const viewportFrozenClones = new WeakSet()
+export const viewportFrozenClones = new WeakSet()
 
 /**
  * Resolves the `clip` option to a rect in viewport coordinates (same space as
