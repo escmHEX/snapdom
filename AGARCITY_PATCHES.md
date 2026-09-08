@@ -7,6 +7,10 @@ application supplies its own surface, canvas snapshots and upload contracts.
 
 ## Snapshot ownership
 
+Animation acquisition indexes targets and pseudoelements by identity. Repeated
+keyframes/effects read each computed property only once per target/pseudo in the
+synchronous snapshot task; no cache or invalidation work survives that task.
+
 The `@zumer/snapdom/snapshot` entry exposes `snapshot(element, options)` and
 `materializeSnapshot(snapshot, options)`. The first call is synchronous. It copies
 DOM structure, CSS, viewport and dynamic state before returning. Materialization

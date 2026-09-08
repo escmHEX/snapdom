@@ -247,17 +247,24 @@ export function snapshot(element, options = {}) {
       const effect = animation.effect, source = effect?.target
       if (!source || !copies.has(source)) continue
       const pseudo = effect.pseudoElement || null
-      const key = `${sourceNodes.indexOf(source)}:${pseudo || ''}`
-      let entry = animated.get(key)
-      if (!entry) { entry = { node: copies.get(source), pseudo, values: new Map() }; animated.set(key, entry) }
-      const computed = view.getComputedStyle(source, pseudo)
+      // Several effects/keyframes can share the same computed value. Index by
+      // target identity instead of scanning the document for every animation.
+      let pseudos = animated.get(source)
+      if (!pseudos) { pseudos = new Map(); animated.set(source, pseudos) }
+      let entry = pseudos.get(pseudo)
+      if (!entry) {
+        entry = { node: copies.get(source), pseudo, values: new Map() }
+        pseudos.set(pseudo, entry); animations.push(entry)
+      }
+      let computed
       for (const frame of effect.getKeyframes()) for (const name of Object.keys(frame)) {
         if (['offset', 'computedOffset', 'easing', 'composite'].includes(name)) continue
         const property = name.startsWith('--') ? name : name.replace(/[A-Z]/g, match => `-${match.toLowerCase()}`)
+        if (entry.values.has(property)) continue
+        computed ||= view.getComputedStyle(source, pseudo)
         entry.values.set(property, computed.getPropertyValue(property))
       }
     }
-    animations.push(...animated.values())
     const host = owner.body || owner.documentElement
     const viewport = { width: view.innerWidth, height: view.innerHeight, scrollX: view.scrollX, scrollY: view.scrollY,
       colorScheme: view.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light' }

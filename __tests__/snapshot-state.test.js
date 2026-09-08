@@ -16,6 +16,27 @@ async function materialize(state) {
 }
 
 describe('structural snapshot state', () => {
+  it('reads each animated property once per target and pseudo across effects and keyframes', () => {
+    const root = mount('div')
+    const nativeComputed = window.getComputedStyle.bind(window)
+    const reads = []
+    const computed = vi.spyOn(window, 'getComputedStyle').mockImplementation((node, pseudo) => {
+      if (node !== root || !pseudo) return nativeComputed(node, pseudo)
+      return { getPropertyValue(name) { reads.push([pseudo, name]); return name === 'opacity' ? '0.5' : 'rgb(1, 2, 3)' } }
+    })
+    const animations = vi.spyOn(document, 'getAnimations').mockReturnValue(
+      ['::before', '::after', '::before'].map(pseudoElement => ({ effect: {
+        target: root, pseudoElement,
+        getKeyframes: () => [{ opacity: 0, color: 'red', offset: 0 }, { opacity: 1, color: 'blue', offset: 1 }],
+      } })))
+    try {
+      const state = snapshot(root); cleanup.push(() => state.dispose())
+      expect(reads).toEqual([['::before', 'opacity'], ['::before', 'color'], ['::after', 'opacity'], ['::after', 'color']])
+      expect(state._state.animations).toHaveLength(2)
+      for (const entry of state._state.animations) expect([...entry.values]).toEqual([['opacity', '0.5'], ['color', 'rgb(1, 2, 3)']])
+    } finally { computed.mockRestore(); animations.mockRestore() }
+  })
+
   it('preserves stylesheet tags, attributes and sibling selectors with frozen CSSOM', async () => {
     const root = mount('div')
     root.innerHTML = '<style id="snapshot-owned-style" class="sheet" data-owner="original">#snapshot-owned-style.sheet[data-owner="original"] + span{padding-left:17px}</style><span>styled sibling</span><link id="snapshot-owned-link" class="sheet" rel="stylesheet"><b>linked sibling</b>'
