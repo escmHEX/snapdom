@@ -47,7 +47,7 @@ export function resolveClipRect(element, clip) {
 function composedParent(n) {
   if (n.parentElement) return n.parentElement
   const rn = n.getRootNode && n.getRootNode()
-  return rn instanceof ShadowRoot ? rn.host : null
+  return rn instanceof (rn?.ownerDocument?.defaultView?.ShadowRoot || ShadowRoot) ? rn.host : null
 }
 
 function composedContains(root, node) {
@@ -148,7 +148,7 @@ export function freezeViewportPositioned(root, cloneRoot, nodeMap, styleCache, e
       w = /** @type {HTMLElement} */ (orig).offsetWidth || r.width
       h = /** @type {HTMLElement} */ (orig).offsetHeight || r.height
     }
-    const inShadow = orig.getRootNode && orig.getRootNode() instanceof ShadowRoot
+    const inShadow = orig.getRootNode && orig.getRootNode() instanceof (orig.ownerDocument?.defaultView?.ShadowRoot || ShadowRoot)
     let baseR = rootR, baseBL = root.clientLeft || 0, baseBT = root.clientTop || 0
     if (inShadow) {
       const cb = findCBAncestor(orig, root)
@@ -296,11 +296,11 @@ function firstInFlowBlockChild(el, side) {
   const kids = Array.from(el.childNodes)
   const ordered = side === 'top' ? kids : kids.reverse()
   for (const n of ordered) {
-    if (n.nodeType === Node.TEXT_NODE) {
+    if (n.nodeType === globalThis.Node.TEXT_NODE) {
       if (/\S/.test(n.textContent || '')) return null // inline content → no collapse
       continue
     }
-    if (n.nodeType !== Node.ELEMENT_NODE) continue
+    if (n.nodeType !== globalThis.Node.ELEMENT_NODE) continue
     const cs = getComputedStyle(n)
     const disp = String(cs.display || '')
     if (disp === 'none' || disp === 'contents') continue
@@ -444,7 +444,7 @@ const INVALID_XML_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/g
 export function stripInvalidXMLChars(root) {
   if (!root) return
   const clean = (node) => {
-    if (node.nodeType === Node.ELEMENT_NODE) {
+    if (node.nodeType === globalThis.Node.ELEMENT_NODE) {
       if (node.attributes) {
         for (const attr of Array.from(node.attributes)) {
           const cv = attr.value.replace(INVALID_XML_CHARS, '')
@@ -453,7 +453,7 @@ export function stripInvalidXMLChars(root) {
           }
         }
       }
-    } else if (node.nodeType === Node.TEXT_NODE || node.nodeType === Node.CDATA_SECTION_NODE) {
+    } else if (node.nodeType === globalThis.Node.TEXT_NODE || node.nodeType === globalThis.Node.CDATA_SECTION_NODE) {
       const cv = node.data.replace(INVALID_XML_CHARS, '')
       if (cv !== node.data) node.data = cv
     }
@@ -489,13 +489,13 @@ function authorHasExplicitSize(el) {
  * @param {Element} el
  */
 function isReplacedElement(el) {
-  return el instanceof HTMLImageElement ||
-    el instanceof HTMLCanvasElement ||
-    el instanceof HTMLVideoElement ||
-    el instanceof HTMLIFrameElement ||
-    el instanceof SVGElement ||
-    el instanceof HTMLObjectElement ||
-    el instanceof HTMLEmbedElement
+  return el instanceof (el.ownerDocument?.defaultView?.HTMLImageElement || HTMLImageElement) ||
+    el instanceof (el.ownerDocument?.defaultView?.HTMLCanvasElement || HTMLCanvasElement) ||
+    el instanceof (el.ownerDocument?.defaultView?.HTMLVideoElement || HTMLVideoElement) ||
+    el instanceof (el.ownerDocument?.defaultView?.HTMLIFrameElement || HTMLIFrameElement) ||
+    el instanceof (el.ownerDocument?.defaultView?.SVGElement || SVGElement) ||
+    el instanceof (el.ownerDocument?.defaultView?.HTMLObjectElement || HTMLObjectElement) ||
+    el instanceof (el.ownerDocument?.defaultView?.HTMLEmbedElement || HTMLEmbedElement)
 }
 
 /**
@@ -521,63 +521,47 @@ function shouldShrinkBox(srcEl, cs) {
 }
 
 /**
- * Post-clone "shrink pass": for parents that lost children due to excludeMode:"remove",
- * override snapshot sizes so they can collapse naturally.
- *
- * It writes inline overrides on the CLONE (never the real DOM):
- *   - height/width: auto
- *   - remove logical sizes (block-size/inline-size)
- *   - relax min/max to allow collapse
- *
- * @param {Element} sourceRoot - original subtree root (for reading computed styles)
- * @param {HTMLElement} cloneRoot - cloned subtree root (to write overrides)
- * @param {Map<Element, CSSStyleDeclaration>} styleCache - optional cache you already build
+ * Release snapshot sizes on normal-flow parents that lost source children.
+ * The node map keeps exclusions, replacement nodes and generated pseudo wrappers
+ * from shifting source/clone correspondence. Author min/max and overflow survive.
+ * @param {Element} sourceRoot
+ * @param {HTMLElement} cloneRoot
+ * @param {Map<Element, CSSStyleDeclaration>|WeakMap<Element, CSSStyleDeclaration>} styleCache
+ * @param {Map<Node, Node>} nodeMap - clone to source
  */
-export function shrinkAutoSizeBoxes(sourceRoot, cloneRoot, styleCache = new Map()) {
-  /**
-   * @param {Element} src
-   * @param {Element} cln
-   */
-  function walk(src, cln) {
-    if ((src?.nodeType !== 1) || (cln?.nodeType !== 1)) return
+export function shrinkAutoSizeBoxes(sourceRoot, cloneRoot, styleCache = new Map(), nodeMap = new Map()) {
+  if (sourceRoot?.nodeType !== 1 || cloneRoot?.nodeType !== 1) return
 
-    // If the clone lost children relative to the source, it's a good candidate to shrink.
-    const lostKids = src.childElementCount > cln.childElementCount
+  const retainedSources = new Set()
+  const pairs = []
+  const walker = document.createTreeWalker(cloneRoot, NodeFilter.SHOW_ELEMENT)
+  let cln = cloneRoot
+  do {
+    const src = nodeMap.get(cln) || (cln === cloneRoot ? sourceRoot : null)
+    if (src?.nodeType === 1) {
+      retainedSources.add(src)
+      pairs.push([src, cln])
+    }
+  } while ((cln = walker.nextNode()))
 
-    const cs = styleCache.get(src) || getComputedStyle(src)
-    if (!styleCache.has(src)) styleCache.set(src, cs)
-
-    if (lostKids && shouldShrinkBox(src, cs)) {
-      // Inline overrides beat generated classes -> safe, local to the clone.
-      if (!cln.style.height) cln.style.height = 'auto'
-      if (!cln.style.width) cln.style.width = 'auto'
-
-      cln.style.removeProperty('block-size')
-      cln.style.removeProperty('inline-size')
-
-      if (!cln.style.minHeight) cln.style.minHeight = '0'
-      if (!cln.style.minWidth) cln.style.minWidth = '0'
-      if (!cln.style.maxHeight) cln.style.maxHeight = 'none'
-      if (!cln.style.maxWidth) cln.style.maxWidth = 'none'
-
-      // Ensure the box can actually reveal its new size
-      // (only when author didn't lock overflow intentionally)
-      const oy = cs.overflowY || cs.overflowBlock || 'visible'
-      const ox = cs.overflowX || cs.overflowInline || 'visible'
-      if (oy !== 'visible' || ox !== 'visible') {
-        cln.style.overflow = 'visible'
+  for (const [src, cloneEl] of pairs) {
+    let lostKids = false
+    for (const child of src.children) {
+      if (!retainedSources.has(child) && contributesToParentHeight(child)) {
+        lostKids = true
+        break
       }
     }
+    if (!lostKids) continue
+    const cs = styleCache.get(src) || getComputedStyle(src)
+    if (!styleCache.has(src)) styleCache.set(src, cs)
+    if (!shouldShrinkBox(src, cs)) continue
 
-    // Walk element children in order (pseudo wrappers are already inlined elsewhere)
-    const sKids = Array.from(src.children)
-    const cKids = Array.from(cln.children)
-    for (let i = 0; i < Math.min(sKids.length, cKids.length); i++) {
-      walk(sKids[i], cKids[i])
-    }
+    if (!cloneEl.style.height) cloneEl.style.height = 'auto'
+    if (!cloneEl.style.width) cloneEl.style.width = 'auto'
+    cloneEl.style.removeProperty('block-size')
+    cloneEl.style.removeProperty('inline-size')
   }
-
-  walk(sourceRoot, cloneRoot)
 }
 
 /**
@@ -822,18 +806,19 @@ const SCROLLBAR_PSEUDO = /::-webkit-scrollbar(-[a-z]+)?\b/i
  * @param {Set<string>} seen - dedupe by cssText
  * @returns {string}
  */
-function collectScrollbarRulesFromRules(rules, seen = new Set()) {
+function* collectScrollbarRulesFromRules(rules, seen = new Set()) {
   let out = ''
   if (!rules) return out
   for (let i = 0; i < rules.length; i++) {
+    yield
     const rule = rules[i]
     try {
       if (rule.type === CSSRule.IMPORT_RULE && rule.styleSheet) {
-        out += collectScrollbarRulesFromRules(rule.styleSheet.cssRules, seen)
+        out += yield* collectScrollbarRulesFromRules(rule.styleSheet.cssRules, seen)
         continue
       }
       if (rule.type === CSSRule.MEDIA_RULE && rule.cssRules) {
-        const inner = collectScrollbarRulesFromRules(rule.cssRules, seen)
+        const inner = yield* collectScrollbarRulesFromRules(rule.cssRules, seen)
         if (inner) out += `@media ${rule.conditionText}{${inner}}`
         continue
       }
@@ -858,9 +843,10 @@ function collectScrollbarRulesFromRules(rules, seen = new Set()) {
  *  The fingerprint (href + rule count per sheet) is O(#sheets) and catches inserts/removals. */
 const _scrollbarCSSMemo = new WeakMap()
 
-function scrollbarFingerprint(doc) {
+function* scrollbarFingerprint(doc) {
   let fp = ''
   for (const sheet of doc.styleSheets) {
+    yield
     let n = -1
     try { n = sheet.cssRules ? sheet.cssRules.length : -1 } catch { /* cross-origin */ }
     fp += (sheet.href || 'inline') + ':' + n + '|'
@@ -875,16 +861,39 @@ function scrollbarFingerprint(doc) {
  * @returns {string}
  */
 export function collectScrollbarCSS(doc) {
+  const steps = scrollbarCSSSteps(doc)
+  let step
+  do { step = steps.next() } while (!step.done)
+  return step.value
+}
+
+/** Yield between stylesheet/rule reads, outside the CORS catches so scheduler
+ * cancellation propagates and a partial result never enters the memo. */
+export async function collectScrollbarCSSCooperative(doc, scheduler) {
+  const steps = scrollbarCSSSteps(doc)
+  try {
+    let step = steps.next()
+    while (!step.done) {
+      let pause
+      while ((pause = scheduler?.checkpoint())) await pause
+      step = steps.next()
+    }
+    return step.value
+  } finally { steps.return() }
+}
+
+function* scrollbarCSSSteps(doc) {
   if (!doc || !doc.styleSheets) return ''
-  const fp = scrollbarFingerprint(doc)
+  const fp = yield* scrollbarFingerprint(doc)
   const memo = _scrollbarCSSMemo.get(doc)
   if (memo && memo.fp === fp) return memo.css
   const seen = new Set()
   let out = ''
   for (const sheet of Array.from(doc.styleSheets)) {
+    yield
     try {
       const rules = sheet.cssRules
-      if (rules) out += collectScrollbarRulesFromRules(rules, seen)
+      if (rules) out += yield* collectScrollbarRulesFromRules(rules, seen)
     } catch {
       // Cross-origin stylesheet; cannot read cssRules
     }

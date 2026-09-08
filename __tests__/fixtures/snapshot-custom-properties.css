@@ -1,0 +1,4 @@
+#snapshot-external-custom {
+  --snapshot-external-image: url(./snapshot-custom-properties-icon.png);
+  background-image: var(--snapshot-external-image);
+}

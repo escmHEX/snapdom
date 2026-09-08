@@ -72,8 +72,15 @@ describe('serialized scroll layout', () => {
   it('does not remove a measured classic scrollbar gutter', () => {
     const source = fixture('scrollbar-gutter:stable', 0, 0)
     const clone = cloneFixture(source)
-    expect(clone.style.scrollbarWidth).toBe(source.style.scrollbarWidth)
-    expect(clone.style.scrollbarGutter).toBe(source.style.scrollbarGutter)
+    const cs = getComputedStyle(source)
+    const gutter = source.offsetWidth - source.clientWidth -
+      parseFloat(cs.borderLeftWidth) - parseFloat(cs.borderRightWidth)
+    expect(clone.clientWidth).toBe(source.clientWidth)
+    // Overlay engines do not reserve a gutter even with scrollbar-gutter:stable.
+    if (gutter > 0) {
+      expect(clone.style.scrollbarWidth).toBe(source.style.scrollbarWidth)
+      expect(clone.style.scrollbarGutter).toBe(source.style.scrollbarGutter)
+    } else expect(clone.style.scrollbarWidth).toBe('none')
   })
 
   it('retains the inline formatting of inline-flex scrollers', () => {
@@ -92,4 +99,60 @@ describe('serialized scroll layout', () => {
     expect(clonedChild.getBoundingClientRect().top).toBeCloseTo(rect.top, 0)
     expect(clonedChild.getBoundingClientRect().left).toBeCloseTo(rect.left, 0)
   })
+  it('keeps zero-gutter scrollports from gaining a classic gutter at rest', () => {
+    const source = fixture('display:block', 0, 0)
+    source.firstElementChild.style.width = '350px'
+    const cs = getComputedStyle(source)
+    const vertical = Math.round(source.offsetWidth - source.clientWidth - parseFloat(cs.borderLeftWidth) - parseFloat(cs.borderRightWidth))
+    const horizontal = Math.round(source.offsetHeight - source.clientHeight - parseFloat(cs.borderTopWidth) - parseFloat(cs.borderBottomWidth))
+    const clone = cloneFixture(source)
+    if (vertical === 0 && horizontal === 0) {
+      expect(clone.style.scrollbarWidth).toBe('none')
+      expect(clone.clientWidth).toBe(source.clientWidth)
+      expect(clone.clientHeight).toBe(source.clientHeight)
+    } else {
+      expect(clone.style.scrollbarWidth).toBe(source.style.scrollbarWidth)
+      expect(clone.clientWidth).toBe(source.clientWidth)
+    }
+    expect(source.scrollTop).toBe(0)
+    expect(source.scrollLeft).toBe(0)
+  })
+
+  it('does not alter scrollbar styling on boxes that do not overflow', () => {
+    const source = fixture('display:block', 0, 0)
+    source.replaceChildren(source.firstElementChild)
+    const clone = cloneFixture(source)
+    expect(clone.style.scrollbarWidth).toBe(source.style.scrollbarWidth)
+    expect(clone.style.scrollbarGutter).toBe(source.style.scrollbarGutter)
+  })
+
+})
+
+describe('native input scroll serialization', () => {
+  for (const direction of ['ltr', 'rtl']) {
+    for (const end of [false, true]) {
+      it(`preserves ${direction} focused text at the ${end ? 'end' : 'start'}`, () => {
+        const input = document.createElement('input')
+        input.value = 'ABCDEFGHIJKLMN OPQRSTUVWXYZ 0123456789'
+        input.style.cssText = `direction:${direction};box-sizing:border-box;width:180px;height:40px;padding:3px;border:2px solid black;font:20px monospace;text-indent:5px`
+        document.body.appendChild(input)
+        mounts.push(input)
+        input.focus()
+        input.setSelectionRange(end ? input.value.length : 0, end ? input.value.length : 0)
+        input.scrollLeft = end ? (direction === 'rtl' ? -10000 : 10000) : 0
+        const offset = input.scrollLeft
+        if (end) expect(Math.abs(offset)).toBeGreaterThan(100)
+        const clone = cloneFixture(input)
+        expect(clone.childNodes.length).toBe(0) // HTML void elements cannot serialize an inner scroll box.
+        expect(clone.value).toBe(input.value)
+        expect(clone.getBoundingClientRect().width).toBe(input.getBoundingClientRect().width)
+        expect(clone.getBoundingClientRect().height).toBe(input.getBoundingClientRect().height)
+        expect(getComputedStyle(clone).padding).toBe('3px')
+        expect(getComputedStyle(clone).borderLeftWidth).toBe('2px')
+        expect(parseFloat(getComputedStyle(clone).textIndent)).toBeCloseTo(5 + (direction === 'rtl' ? offset : -offset), 4)
+        expect(input.scrollLeft).toBe(offset)
+        expect(input.style.textIndent).toBe('5px')
+      })
+    }
+  }
 })

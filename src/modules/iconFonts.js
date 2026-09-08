@@ -1,3 +1,4 @@
+import { canvasToDataURL } from '../utils/blob.js'
 // iconFonts.js
 import { cache } from '../core/cache.js'
 
@@ -68,7 +69,9 @@ export function isMaterialFamily(family = '') {
   return /\bmaterial\s*icons\b/.test(s) || /\bmaterial\s*symbols\b/.test(s)
 }
 
-const loadedCanvasFamilies = new Map()
+// A loaded alias belongs to one FontFaceSet. Detached capture documents must not
+// reuse a global "loaded" flag or be retained after their sandbox is disposed.
+const loadedCanvasFamilies = new WeakMap()
 
 function parseAxes(variation = '') {
   const out = Object.create(null)
@@ -93,7 +96,7 @@ function parseAxes(variation = '') {
  * This avoids forcing "Icons" when Symbols are present, and only swaps when we
  * can guarantee the desired "filled" appearance on canvas.
  */
-async function ensureLigatureCanvasFont(cssFamily, className, axes) {
+async function ensureLigatureCanvasFont(cssFamily, className, axes, ownerDocument) {
   const fam = String(cssFamily || '')
   const lowerFam = fam.toLowerCase()
   const cls = String(className || '').toLowerCase()
@@ -135,13 +138,17 @@ async function ensureLigatureCanvasFont(cssFamily, className, axes) {
     return { familyForMeasure: fam, familyForCanvas: fam }
   }
 
-  if (!loadedCanvasFamilies.has(pick.alias)) {
+  let families = loadedCanvasFamilies.get(ownerDocument)
+  if (!families) { families = new Map(); loadedCanvasFamilies.set(ownerDocument, families) }
+  if (!families.has(pick.alias)) {
+    let ff
     try {
-      const ff = new FontFace(pick.alias, `url(${pick.url})`, { style: 'normal', weight: '400' })
-      document.fonts.add(ff)
+      ff = new ownerDocument.defaultView.FontFace(pick.alias, `url(${pick.url})`, { style: 'normal', weight: '400' })
+      ownerDocument.fonts.add(ff)
       await ff.load()
-      loadedCanvasFamilies.set(pick.alias, true)
+      families.set(pick.alias, true)
     } catch {
+      if (ff) ownerDocument.fonts.delete(ff)
       // If loading fails, stay on Symbols
       return { familyForMeasure: fam, familyForCanvas: fam }
     }
@@ -151,11 +158,11 @@ async function ensureLigatureCanvasFont(cssFamily, className, axes) {
   return { familyForMeasure: quoted, familyForCanvas: quoted }
 }
 
-export async function ensureMaterialFontsReady(family = 'Material Icons', px = 24) {
+export async function ensureMaterialFontsReady(family = 'Material Icons', px = 24, ownerDocument = document) {
   try {
     await Promise.all([
-      document.fonts.load(`400 ${px}px "${String(family).replace(/["']/g, '')}"`),
-      document.fonts.ready
+      ownerDocument.fonts.load(`400 ${px}px "${String(family).replace(/["']/g, '')}"`),
+      ownerDocument.fonts.ready
     ])
   } catch { /* noop */ }
 }
@@ -176,20 +183,21 @@ export async function materialIconToImage(
     fontSize = 32,
     color = '#000',
     variation = '',
-    className = ''
+    className = '',
+    ownerDocument = document,
+    dpr = ownerDocument.defaultView?.devicePixelRatio || 1
   } = {}
 ) {
   const fam = String(family || '').replace(/^['"]+|['"]+$/g, '')
-  const dpr = window.devicePixelRatio || 1
   const axes = parseAxes(variation)
 
   const { familyForMeasure, familyForCanvas } =
-    await ensureLigatureCanvasFont(fam, className, axes)
+    await ensureLigatureCanvasFont(fam, className, axes, ownerDocument)
 
-  await ensureMaterialFontsReady(familyForCanvas.replace(/^["']+|["']+$/g, ''), fontSize)
+  await ensureMaterialFontsReady(familyForCanvas.replace(/^["']+|["']+$/g, ''), fontSize, ownerDocument)
 
   // Measure with same family used on canvas
-  const span = document.createElement('span')
+  const span = ownerDocument.createElement('span')
   span.setAttribute('data-snapdom-internal', '')
   span.textContent = ligatureText
   span.style.position = 'absolute'
@@ -206,36 +214,41 @@ export async function materialIconToImage(
   span.style.fontVariantLigatures = 'normal'
   span.style.color = color
 
-  document.body.appendChild(span)
-  const rect = span.getBoundingClientRect()
-  const width = Math.max(1, Math.ceil(rect.width))
-  const height = Math.max(1, Math.ceil(rect.height))
-  document.body.removeChild(span)
+  let width, height
+  ownerDocument.body.appendChild(span)
+  try {
+    const rect = span.getBoundingClientRect()
+    width = Math.max(1, Math.ceil(rect.width))
+    height = Math.max(1, Math.ceil(rect.height))
+  } finally { span.remove() }
 
-  const canvas = document.createElement('canvas')
-  canvas.width = width * dpr
-  canvas.height = height * dpr
-  const ctx = canvas.getContext('2d')
-  ctx.scale(dpr, dpr)
-  ctx.font = `${weight ? `${weight} ` : ''}${fontSize}px ${familyForCanvas}`
-  ctx.textAlign = 'left'
-  ctx.textBaseline = 'top'
-  ctx.fillStyle = color
-  try { ctx.fontKerning = 'normal' } catch {}
-  ctx.fillText(ligatureText, 0, 0)
+  const canvas = ownerDocument.createElement('canvas')
+  try {
+    canvas.width = width * dpr
+    canvas.height = height * dpr
+  // The next operation after drawing is PNG readback, so avoid a GPU flush.
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    ctx.scale(dpr, dpr)
+    ctx.font = `${weight ? `${weight} ` : ''}${fontSize}px ${familyForCanvas}`
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'top'
+    ctx.fillStyle = color
+    try { ctx.fontKerning = 'normal' } catch {}
+    ctx.fillText(ligatureText, 0, 0)
 
-  return {
-    dataUrl: canvas.toDataURL(),
+    return {
+    dataUrl: await canvasToDataURL(canvas),
     width,
     height
-  }
+    }
+  } finally { canvas.width = canvas.height = 0 }
 }
 
 /**
  * Replace Material ligature nodes in the CLONE by <img>.
  * Reads styles from SOURCE for accurate size/color/variation/class.
  */
-export async function ligatureIconToImage(cloneRoot, sourceRoot, nodeMap = cache.session.nodeMap) {
+export async function ligatureIconToImage(cloneRoot, sourceRoot, nodeMap = cache.session.nodeMap, options = {}) {
   if ((cloneRoot?.nodeType !== 1)) return 0
 
   const selector = '.material-icons, [class*="material-symbols"]'
@@ -251,6 +264,7 @@ export async function ligatureIconToImage(cloneRoot, sourceRoot, nodeMap = cache
   }
 
   if (cloneNodes.length === 0) return 0
+  const ownerDocument = sourceRoot?.ownerDocument || cloneRoot.ownerDocument
 
   // Map each clone node to its exact source via the clone→source nodeMap built by deepClone.
   // Pairing the two trees positionally breaks when excludeMode:'remove' drops nodes from the
@@ -269,7 +283,7 @@ export async function ligatureIconToImage(cloneRoot, sourceRoot, nodeMap = cache
     const src = (nodeMap && nodeMap.get(el)) || sourceNodes[i] || null
 
     try {
-      const cs = src ? getComputedStyle(src) : getComputedStyle(el)
+      const cs = ownerDocument.defaultView.getComputedStyle(src || el)
       const family = cs.fontFamily || 'Material Icons'
       if (!isMaterialFamily(family)) continue
 
@@ -283,6 +297,7 @@ export async function ligatureIconToImage(cloneRoot, sourceRoot, nodeMap = cache
         ? cs.fontVariationSettings
         : ''
       const className = (src || el).className || ''
+      const verticalAlign = cs.verticalAlign || 'baseline'
 
       const { dataUrl, width, height } = await materialIconToImage(text, {
         family,
@@ -290,7 +305,9 @@ export async function ligatureIconToImage(cloneRoot, sourceRoot, nodeMap = cache
         fontSize: size,
         color,
         variation,
-        className
+        className,
+        ownerDocument,
+        dpr: options.dpr
       })
 
       el.textContent = ''
@@ -300,7 +317,7 @@ export async function ligatureIconToImage(cloneRoot, sourceRoot, nodeMap = cache
       img.style.height = `${size}px`
       img.style.width = `${Math.max(1, Math.round((width / height) * size))}px`
       img.style.objectFit = 'contain'
-      img.style.verticalAlign = getComputedStyle(el).verticalAlign || 'baseline'
+      img.style.verticalAlign = verticalAlign
       el.appendChild(img)
 
       replaced++

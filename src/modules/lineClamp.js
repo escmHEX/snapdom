@@ -36,11 +36,13 @@ export function snapshotTextTruncation(source, clone, cs) {
  * @param {Element} cloneRoot
  * @param {Map<Node, Node>} nodeMap clone to source map for this capture
  */
-export function lineClampTree(cloneRoot, nodeMap, classCSS = '') {
+export async function lineClampTree(cloneRoot, nodeMap, classCSS = '', options = {}) {
   let host
   let shadow
   try {
     for (const clone of nodeMap.keys()) {
+      const pause = options.__scheduler?.checkpoint()
+      if (pause) await pause
       const snapshot = snapshots.get(clone)
       if (!snapshot || !(clone === cloneRoot || cloneRoot.contains(clone))) continue
       if (!host) {
@@ -86,14 +88,24 @@ export function lineClampTree(cloneRoot, nodeMap, classCSS = '') {
         const ends = [0]
         if (typeof Intl.Segmenter === 'function') {
           graphemes ||= new Intl.Segmenter(undefined, { granularity: 'grapheme' })
-          for (const { index, segment } of graphemes.segment(snapshot.text)) ends.push(index + segment.length)
+          for (const { index, segment } of graphemes.segment(snapshot.text)) {
+            const pause = options.__scheduler?.checkpoint()
+            if (pause) await pause
+            ends.push(index + segment.length)
+          }
         } else {
           // Firefox before 125 has no Segmenter. Keep capture available and never
           // cut a surrogate pair; full grapheme boundaries use the native API.
-          for (const point of snapshot.text) ends.push(ends[ends.length - 1] + point.length)
+          for (const point of snapshot.text) {
+            const pause = options.__scheduler?.checkpoint()
+            if (pause) await pause
+            ends.push(ends[ends.length - 1] + point.length)
+          }
         }
         let lo = 0, hi = ends.length - 1, best = 0
         while (lo <= hi) {
+          const pause = options.__scheduler?.checkpoint()
+          if (pause) await pause
           const mid = (lo + hi) >> 1
           write(snapshot.text.slice(0, ends[mid]) + '…')
           if (fits()) { best = mid; lo = mid + 1 } else { hi = mid - 1 }

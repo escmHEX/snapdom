@@ -22,6 +22,7 @@ import {
   createCheckboxRadioReplacement
 } from '../utils/clone.helpers.js'
 import { isFirefox, isSafari, nextFrame } from '../utils/browser.js'
+import { TRANSPARENT_PNG } from '../utils/image.constants.js'
 
 // helper implementations moved to ../utils/clone.helpers.js
 
@@ -142,7 +143,9 @@ function isOutsideClip(node, clip) {
 function makeClipHusk(node, sessionCache, options) {
   const husk = node.cloneNode(false)
   if (node.tagName === 'IMG') {
-    husk.removeAttribute('src')
+    // A source-less cloned image can retain its original document through
+    // Chromium's native viewport-change listener after adoption and removal.
+    husk.src = TRANSPARENT_PNG
     husk.removeAttribute('srcset')
     husk.removeAttribute('sizes')
   }
@@ -166,11 +169,13 @@ function makeClipHusk(node, sessionCache, options) {
 }
 
 export async function deepClone(node, sessionCache, options) {
+  const pause = options.__scheduler?.checkpoint()
+  if (pause) await pause
   if (!node) throw new Error('Invalid node')
   const clonedAssignedNodes = new Set()
   let pendingSelectValue = null
   let pendingTextAreaValue = null
-  if (node.nodeType === Node.ELEMENT_NODE) {
+  if (node.nodeType === globalThis.Node.ELEMENT_NODE) {
     const tag = (node.localName || node.tagName || '').toLowerCase()
     if (node.id === 'snapdom-sandbox' || node.hasAttribute('data-snapdom-sandbox')) {
       return null
@@ -195,10 +200,10 @@ export async function deepClone(node, sessionCache, options) {
       return null
     }
   }
-  if (node.nodeType === Node.TEXT_NODE) {
+  if (node.nodeType === globalThis.Node.TEXT_NODE) {
     return node.cloneNode(true)
   }
-  if (node.nodeType !== Node.ELEMENT_NODE) {
+  if (node.nodeType !== globalThis.Node.ELEMENT_NODE) {
     return node.cloneNode(true)
   }
   if (node.getAttribute('data-capture') === 'exclude') {
@@ -251,8 +256,8 @@ export async function deepClone(node, sessionCache, options) {
         debugWarn(sessionCache, 'resolveNode plugin hook failed', e)
       }
       if (out === null) return null
-      if (out instanceof Node) {
-        if (out.nodeType === Node.ELEMENT_NODE) {
+      if (out instanceof (out?.ownerDocument?.defaultView?.Node || globalThis.Node)) {
+        if (out.nodeType === globalThis.Node.ELEMENT_NODE) {
           // Same treatment as built-in tag handlers: map to the source and carry its box
           // styles so the replacement keeps the original layout.
           sessionCache.nodeMap.set(out, node)
@@ -261,6 +266,25 @@ export async function deepClone(node, sessionCache, options) {
         return out
       }
     }
+  }
+
+  // A display:none HTML subtree has no layout or paint. Preserve its hidden
+  // root, but do not serialize invisible controls, fonts and image resources.
+  // SVG definitions may still be referenced by visible siblings, even when their
+  // HTML ancestor is hidden; those trees continue through the ordinary path.
+  if (node.namespaceURI === 'http://www.w3.org/1999/xhtml' &&
+      getStyle(node)?.display === 'none' && !node.querySelector('svg')) {
+    const hidden = node.cloneNode(false)
+    if (hidden.tagName === 'IMG') {
+      // Keep selector topology without the original resource. A valid neutral
+      // image avoids Chromium's source-less viewport listener retaining the
+      // clone's document after the capture is discarded.
+      hidden.src = TRANSPARENT_PNG
+      hidden.removeAttribute('srcset')
+      hidden.removeAttribute('sizes')
+    }
+    hidden.style.setProperty('display', 'none', 'important')
+    return hidden
   }
 
   {
@@ -366,14 +390,14 @@ export async function deepClone(node, sessionCache, options) {
     throw err
   }
   let applyInputVisual = null
-  if (node instanceof HTMLTextAreaElement) {
+  if (node instanceof (node.ownerDocument?.defaultView?.HTMLTextAreaElement || HTMLTextAreaElement)) {
     const { width, height } = getUnscaledDimensions(node)
     const w = width || node.getBoundingClientRect().width || 0
     const h = height || node.getBoundingClientRect().height || 0
     if (w) clone.style.width = `${w}px`
     if (h) clone.style.height = `${h}px`
   }
-  if (node instanceof HTMLInputElement) {
+  if (node instanceof (node.ownerDocument?.defaultView?.HTMLInputElement || HTMLInputElement)) {
     const type = (node.type || 'text').toLowerCase()
     const isCheckboxOrRadio = type === 'checkbox' || type === 'radio'
     if (isCheckboxOrRadio && isFirefox()) {
@@ -393,7 +417,7 @@ export async function deepClone(node, sessionCache, options) {
   }
 
   // #315: Preserve ::placeholder color for inputs/textareas showing placeholder text
-  if ((node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) && !node.value && node.placeholder) {
+  if ((node instanceof (node.ownerDocument?.defaultView?.HTMLInputElement || HTMLInputElement) || node instanceof (node.ownerDocument?.defaultView?.HTMLTextAreaElement || HTMLTextAreaElement)) && !node.value && node.placeholder) {
     try {
       const phStyle = window.getComputedStyle(node, '::placeholder')
       const phColor = phStyle && phStyle.color
@@ -407,15 +431,15 @@ export async function deepClone(node, sessionCache, options) {
     } catch { /* non-blocking */ }
   }
 
-  if (node instanceof HTMLSelectElement) {
+  if (node instanceof (node.ownerDocument?.defaultView?.HTMLSelectElement || HTMLSelectElement)) {
     pendingSelectValue = node.value
   }
-  if (node instanceof HTMLTextAreaElement) {
+  if (node instanceof (node.ownerDocument?.defaultView?.HTMLTextAreaElement || HTMLTextAreaElement)) {
     pendingTextAreaValue = node.value
   }
   // Copy form validation/state attributes so :disabled, :required, :read-only,
   // :invalid, :in-range/:out-of-range pseudo-class styles render correctly in the capture.
-  if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement || node instanceof HTMLSelectElement) {
+  if (node instanceof (node.ownerDocument?.defaultView?.HTMLInputElement || HTMLInputElement) || node instanceof (node.ownerDocument?.defaultView?.HTMLTextAreaElement || HTMLTextAreaElement) || node instanceof (node.ownerDocument?.defaultView?.HTMLSelectElement || HTMLSelectElement)) {
     if (node.disabled) clone.setAttribute('disabled', '')
     if (node.required) clone.setAttribute('required', '')
     if ((/** @type {HTMLInputElement|HTMLTextAreaElement} */ (node)).readOnly) clone.setAttribute('readonly', '')
@@ -438,7 +462,7 @@ export async function deepClone(node, sessionCache, options) {
   // properties from computed style as inline styles to ensure CSS-driven fills/strokes survive.
   // #408: skip descendants of <symbol>/<defs>/etc. — their var() must resolve at the <use> site,
   // not be materialized to the (dead) template's fallback computed value.
-  if (node instanceof SVGElement && !isInSvgTemplate(node)) {
+  if (node instanceof (node.ownerDocument?.defaultView?.SVGElement || SVGElement) && !isInSvgTemplate(node)) {
     const SVG_PAINT_PROPS = [
       'fill', 'stroke', 'stroke-width', 'stroke-dasharray', 'stroke-dashoffset',
       'stroke-linecap', 'stroke-linejoin', 'stroke-miterlimit', 'opacity',
@@ -482,18 +506,16 @@ export async function deepClone(node, sessionCache, options) {
     // const, not a declaration: esbuild lowers block-level function declarations to a
     // hoisted `var` of the same name, which would clobber the walker below.
     const cloneShadowChild = (child, resolve) => {
-      if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'STYLE') {
+      if (child.nodeType === globalThis.Node.ELEMENT_NODE && child.tagName === 'STYLE') {
         return resolve(null)
       } else {
-        deepClone(child, sessionCache, options).then((clonedChild) => {
+        return deepClone(child, sessionCache, options).then((clonedChild) => {
           resolve(clonedChild || null)
-        }).catch(() => {
-          resolve(null)
         })
       }
     }
 
-    const cloneList = await idleCallback(Array.from(node.shadowRoot.childNodes), cloneShadowChild, options.fast)
+    const cloneList = await idleCallback(Array.from(node.shadowRoot.childNodes), cloneShadowChild, options)
     shadowFrag.append(...cloneList.filter(clonedChild => !!clonedChild))
     clone.appendChild(shadowFrag)
   }
@@ -505,16 +527,14 @@ export async function deepClone(node, sessionCache, options) {
     const fragment = document.createDocumentFragment()
 
     const cloneSlottedChild = (child, resolve) => {
-      deepClone(child, sessionCache, options).then((clonedChild) => {
+      return deepClone(child, sessionCache, options).then((clonedChild) => {
         if (clonedChild && directAssigned.length) {
           markSlottedSubtree(clonedChild, scopeId)
         }
         resolve(clonedChild || null)
-      }).catch(() => {
-        resolve(null)
       })
     }
-    const cloneList = await idleCallback(Array.from(nodesToClone), cloneSlottedChild, options.fast)
+    const cloneList = await idleCallback(Array.from(nodesToClone), cloneSlottedChild, options)
     fragment.append(...cloneList.filter(clonedChild => !!clonedChild))
     return fragment
   }
@@ -526,17 +546,15 @@ export async function deepClone(node, sessionCache, options) {
     // paints nothing. Cloning it anyway injects content the page never shows, and shows it
     // twice when the component mirrors its light DOM into its own shadow tree.
     if (node.shadowRoot && !child.assignedSlot) return resolve(null)
-    deepClone(child, sessionCache, options).then((clonedChild) => {
+    return deepClone(child, sessionCache, options).then((clonedChild) => {
       resolve(clonedChild || null)
-    }).catch(() => {
-      resolve(null)
     })
   }
-  const cloneList = await idleCallback(Array.from(node.childNodes), cloneLightChild, options.fast)
+  const cloneList = await idleCallback(Array.from(node.childNodes), cloneLightChild, options)
   clone.append(...cloneList.filter(clonedChild => !!clonedChild))
 
   // Adjust select value after children are cloned
-  if (pendingSelectValue !== null && clone instanceof HTMLSelectElement) {
+  if (pendingSelectValue !== null && clone instanceof (clone.ownerDocument?.defaultView?.HTMLSelectElement || HTMLSelectElement)) {
     clone.value = pendingSelectValue
     for (const opt of clone.options) {
       if (opt.value === pendingSelectValue) {
@@ -546,7 +564,7 @@ export async function deepClone(node, sessionCache, options) {
       }
     }
   }
-  if (pendingTextAreaValue !== null && clone instanceof HTMLTextAreaElement) {
+  if (pendingTextAreaValue !== null && clone instanceof (clone.ownerDocument?.defaultView?.HTMLTextAreaElement || HTMLTextAreaElement)) {
     clone.textContent = pendingTextAreaValue
   }
   return clone

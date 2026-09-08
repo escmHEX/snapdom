@@ -5,7 +5,7 @@
  */
 
 import { snapFetch } from './snapFetch.js'
-import { cache } from '../core/cache.js'
+import { cache, canPersistResourceURL } from '../core/cache.js'
 import { pickSrcsetCandidate } from './pictureResolver.js'
 
 const XLINK_NS = 'http://www.w3.org/1999/xlink'
@@ -52,6 +52,19 @@ export async function inlineImages(clone, options = {}) {
   if (clone.tagName === 'IMG') imgs.unshift(clone)
   /** @param {HTMLImageElement} img */
   const processImg = async (img) => {
+    const session = options.__session
+    const source = session?.nodeMap.get(img)
+    if (source?.localName === 'img' && session.styleCache.get(source)?.visibility === 'hidden' &&
+        source.complete && source.naturalWidth && source.naturalHeight) {
+      // Hidden replaced elements still contribute intrinsic size and baseline.
+      // An empty SVG preserves those intrinsic dimensions without embedding the
+      // original pixels; a 1px image or a source-less node would change layout.
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${source.naturalWidth}" height="${source.naturalHeight}"/>`
+      img.removeAttribute('srcset')
+      img.removeAttribute('sizes')
+      img.src = `data:image/svg+xml,${encodeURIComponent(svg)}`
+      return
+    }
     // Normalize src/srcset/sizes to a single concrete URL. currentSrc stays empty on the
     // detached clone until the candidate loads (Chromium/Firefox), so derive a candidate
     // from srcset before stripping it — never demote a sourced img to a source-less one.
@@ -69,7 +82,8 @@ export async function inlineImages(clone, options = {}) {
     // Reuse a dataURL prefetched by preCache (keyed by the same resolved src) so the capture
     // path doesn't re-fetch it. snapFetch doesn't cache successes, so without this the prefetch
     // bought nothing.
-    const cached = cache.image?.get(src)
+    const persistent = canPersistResourceURL(src)
+    const cached = persistent && cache.image?.get(src)
     if (cached) {
       img.src = cached
       if (!img.width) img.width = img.naturalWidth || 100
@@ -80,7 +94,7 @@ export async function inlineImages(clone, options = {}) {
     const r = await snapFetch(src, { as: 'dataURL', useProxy: options.useProxy })
     if (r.ok && typeof r.data === 'string' && r.data.startsWith('data:')) {
       // Success path: inline DataURL and ensure dimensions for layout fidelity
-      cache.image?.set(src, r.data)
+      if (persistent) cache.image?.set(src, r.data)
       img.src = r.data
       if (!img.width) img.width = img.naturalWidth || 100
       if (!img.height) img.height = img.naturalHeight || 100

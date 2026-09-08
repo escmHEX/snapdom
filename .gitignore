@@ -140,6 +140,7 @@ drafts/
 demos/
 
 __tests__/__screenshots__
+__tests__/fixtures/node-global-collision.bundle.js
 __snapshots__
 
 .vscode/

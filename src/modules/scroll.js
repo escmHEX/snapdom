@@ -18,8 +18,33 @@ export function preserveScrollLayout(clone, source, styleCache, nodeMap) {
   if (clone?.nodeType !== 1 || clone.namespaceURI !== HTML_NS) return
   const scrollX = source.scrollLeft
   const scrollY = source.scrollTop
-  if (!scrollX && !scrollY) return
   const cs = styleCache.get(source) || getStyle(source)
+  if (!scrollX && !scrollY) {
+    const horizontal = cs.overflowX === 'scroll' ||
+      (cs.overflowX === 'auto' && source.scrollWidth > source.clientWidth)
+    const vertical = cs.overflowY === 'scroll' ||
+      (cs.overflowY === 'auto' && source.scrollHeight > source.clientHeight)
+    if (!horizontal && !vertical) return
+    const gutterX = Math.round(source.offsetWidth - source.clientWidth -
+      parseFloat(cs.borderLeftWidth) - parseFloat(cs.borderRightWidth))
+    const gutterY = Math.round(source.offsetHeight - source.clientHeight -
+      parseFloat(cs.borderTopWidth) - parseFloat(cs.borderBottomWidth))
+    if (gutterX === 0 && gutterY === 0) {
+      // A foreignObject can use classic bars even when its source uses overlay
+      // bars. Suppress only that zero-gutter case; a measured classic gutter stays.
+      clone.style.scrollbarWidth = 'none'
+      clone.style.scrollbarGutter = 'auto'
+    }
+    return
+  }
+
+  if (source.localName === 'input') {
+    // Input is a void element: an inner translated box cannot survive SVG
+    // serialization. Keep its native font/border rendering and shift the text.
+    const shift = cs.direction === 'rtl' ? scrollX : -scrollX
+    clone.style.textIndent = `calc(${cs.textIndent} + ${shift}px)`
+    return
+  }
 
   const inner = clone.ownerDocument.createElement('div')
   inner.style.all = 'unset'

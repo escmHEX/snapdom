@@ -1,4 +1,4 @@
-import { cache } from '../core/cache'
+import { cache, canPersistResourceURL } from '../core/cache'
 import { extractURL, safeEncodeURI, resolveURL, resolveImageSetURL } from './helpers'
 import { snapFetch } from '../modules/snapFetch'
 
@@ -34,9 +34,10 @@ export async function inlineSingleBackgroundEntry(entry, options = {}) {
   // Cache key includes the proxy: a CORS failure under one proxy setting must not poison
   // a later capture of the same URL with a working proxy (a `null` would mask a recoverable
   // image). Successes are also keyed per proxy, which is constant in practice.
+  const persistent = canPersistResourceURL(encodedUrl)
   const cacheKey = (options.useProxy || '') + '|' + encodedUrl
   // Fast path: cached success
-  if (cache.background.has(cacheKey)) {
+  if (persistent && cache.background.has(cacheKey)) {
     const dataUrl = cache.background.get(cacheKey)
     return dataUrl ? `url("${dataUrl}")` : 'none'
   }
@@ -45,15 +46,15 @@ export async function inlineSingleBackgroundEntry(entry, options = {}) {
     const dataUrl = await snapFetch(encodedUrl, { as: 'dataURL', useProxy: options.useProxy })
     // Guard: ensure it actually looks like an image data URL
     if (dataUrl.ok) {
-      cache.background.set(cacheKey, dataUrl.data)
+      if (persistent) cache.background.set(cacheKey, dataUrl.data)
       return `url("${dataUrl.data}")`
     }
     // Unexpected format → degrade safely
-    cache.background.set(cacheKey, null)
+    if (persistent) cache.background.set(cacheKey, null)
     return 'none'
   } catch {
     // On any error (404/CORS/timeout/tainted/etc.), don't break the capture
-    cache.background.set(cacheKey, null) // remember failure to avoid loops
+    if (persistent) cache.background.set(cacheKey, null) // remember failure to avoid loops
     return 'none'
   }
 }

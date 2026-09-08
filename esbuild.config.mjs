@@ -63,6 +63,8 @@ async function buildSubpaths() {
     entryPoints: {
       'preCache': 'src/api/preCache.js',
       'plugins': 'src/core/plugins.js',
+      'snapshot': 'src/api/snapshot.js',
+      'rasterize': 'src/api/rasterize.js',
     },
     outdir: 'dist',
     outExtension: { '.js': '.mjs' },

@@ -4,13 +4,14 @@
  * @returns {Promise<void>} Promise that resolves after the delay
  */
 
-export function idle(fn, { fast = false } = {}) {
-  if (fast) return fn()
-  if ('requestIdleCallback' in window) {
-    requestIdleCallback(fn, { timeout: 50 })
-  } else {
-    setTimeout(fn, 1)
+export function idle(fn, { fast = false, timeout = 50 } = {}) {
+  if (fast) { fn(); return () => {} }
+  if (typeof window.requestIdleCallback === 'function') {
+    const id = window.requestIdleCallback(fn, timeout === null ? undefined : { timeout })
+    return () => window.cancelIdleCallback(id)
   }
+  const id = setTimeout(fn, 0)
+  return () => clearTimeout(id)
 }
 
 /**
@@ -31,10 +32,14 @@ export function nextFrame(timeout = 1000) {
   if (typeof requestAnimationFrame !== 'function') return Promise.resolve()
   if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return Promise.resolve()
   return new Promise((resolve) => {
-    let settled = false
-    const done = () => { if (!settled) { settled = true; resolve() } }
-    try { requestAnimationFrame(done) } catch { done(); return }
-    setTimeout(done, timeout)
+    let frameId, timerId
+    const done = () => {
+      cancelAnimationFrame(frameId)
+      clearTimeout(timerId)
+      resolve()
+    }
+    try { frameId = requestAnimationFrame(done) } catch { resolve(); return }
+    timerId = setTimeout(done, timeout)
   })
 }
 

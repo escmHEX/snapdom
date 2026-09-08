@@ -58,6 +58,12 @@ export const cache = {
 
 export { EvictingMap }
 
+/** Revocable object URLs and self-contained data URLs belong to the operation,
+ * not the persistent resource cache. Retaining them keeps unique capture bytes. */
+export function canPersistResourceURL(url) {
+  return !/^(?:blob|data):/i.test(url)
+}
+
 /**
  * Normalizes shorthand values to canonical cache policies.
  *  - true  => "soft"

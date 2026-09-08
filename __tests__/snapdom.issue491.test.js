@@ -140,7 +140,7 @@ describe('#491 a packed inline row does not wrap in the capture', () => {
 
   it('freezes a nowrap box at its exact width, with no round-up to accumulate', async () => {
     const svg = svgOf(await snapdom.toRaw(host))
-    const width = ruleFor(svg, 'button').match(/(?:^|;)width:([\d.]+)px/)
+    const width = ruleFor(svg, 'button').match(/(?:^|;)\s*width:\s*([\d.]+)px/)
     expect(width).not.toBeNull()
     const live = host.querySelector('button').getBoundingClientRect().width
     // serialization rounds to 1/1000 in either direction; nothing else is added on top

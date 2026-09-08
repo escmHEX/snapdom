@@ -13,6 +13,7 @@ import { stabilizeLayout, forceContentVisibility } from '../utils/prepare.helper
 import { resolveClipRect, freezeViewportPositioned } from '../utils/capture.helpers.js'
 import { nextFrame } from '../utils/browser.js'
 import { preserveScrollLayout } from '../modules/scroll.js'
+import { createScheduler } from '../utils/scheduler.js'
 
 const visibilityWarmups = new Set()
 
@@ -224,9 +225,14 @@ export async function prepareClone(element, options = {}) {
   }
 
   const keyToClass = generateCSSClasses(sessionCache.styleMap)
-  classCSS = Array.from(keyToClass.entries())
-    .map(([key, className]) => `.${className}{${key}}`)
-    .join('')
+  // Let the browser consolidate equivalent shorthand/longhand declarations only
+  // at emission. Keep signature keys intact for cache and clone reconciliation.
+  const declaration = element.ownerDocument.createElement('div').style
+  const scheduler = options.__scheduler || createScheduler(options)
+  classCSS = (await scheduler.run(Array.from(keyToClass.entries()), ([key, className]) => {
+    declaration.cssText = key
+    return `.${className}{${declaration.cssText}}`
+  })).join('')
 
   // #359: suppress native ::before/::after on elements where we inlined them (avoids double render from cloned <style>)
   const PSEUDO_SUPPRESS = '[data-snapdom-has-after]::after,[data-snapdom-has-before]::before{content:none!important;display:none!important}'
@@ -252,7 +258,6 @@ export async function prepareClone(element, options = {}) {
     /* c8 ignore next 4 */
     if (hasIcon) {
       node.style.verticalAlign = 'middle'
-      node.style.display = 'inline'
     }
   }
 

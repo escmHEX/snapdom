@@ -19,6 +19,22 @@ export const NO_DEFAULTS_TAGS = new Set([
 
 import { cache } from '../core/cache'
 
+let defaultStyleSandbox = null
+let defaultStyleUsers = 0
+
+/** A lazily created helper is shared by overlapping captures and removed only
+ * when its last owner settles. Never remove a caller-owned node by matching id. */
+export function acquireDefaultStyleScope() {
+  defaultStyleUsers++
+  return () => {
+    defaultStyleUsers--
+    if (defaultStyleUsers === 0) {
+      defaultStyleSandbox?.remove()
+      defaultStyleSandbox = null
+    }
+  }
+}
+
 const commonTags = [
   'div', 'span', 'p', 'a', 'img', 'ul', 'li', 'button', 'input', 'select', 'textarea', 'label', 'section', 'article', 'header', 'footer', 'nav', 'main', 'aside', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'thead', 'tbody', 'tr', 'td', 'th'
 ]
@@ -27,12 +43,15 @@ const commonTags = [
 // 1) precacheCommonTags → salta NO_CAPTURE y NO_DEFAULTS (no calienta basura)
 // -----------------------------------------------------------------------------
 export function precacheCommonTags() {
-  for (let tag of commonTags) {
-    const t = String(tag).toLowerCase()
-    if (NO_CAPTURE_TAGS.has(t)) continue
-    if (NO_DEFAULTS_TAGS.has(t)) continue // evita precache de SVG/body/etc.
-    getDefaultStyleForTag(t)
-  }
+  const release = acquireDefaultStyleScope()
+  try {
+    for (let tag of commonTags) {
+      const t = String(tag).toLowerCase()
+      if (NO_CAPTURE_TAGS.has(t)) continue
+      if (NO_DEFAULTS_TAGS.has(t)) continue // evita precache de SVG/body/etc.
+      getDefaultStyleForTag(t)
+    }
+  } finally { release() }
 }
 
 // -----------------------------------------------------------------------------
@@ -56,37 +75,42 @@ export function getDefaultStyleForTag(tagName) {
     return cache.defaultStyle.get(tagName)
   }
 
-  let sandbox = document.getElementById('snapdom-sandbox')
-  if (!sandbox) {
-    sandbox = document.createElement('div')
-    sandbox.id = 'snapdom-sandbox'
-    sandbox.setAttribute('data-snapdom-sandbox', 'true')
-    sandbox.setAttribute('aria-hidden', 'true')
-    sandbox.style.position = 'absolute'
-    sandbox.style.left = '-9999px'
-    sandbox.style.top = '-9999px'
-    sandbox.style.width = '0px'
-    sandbox.style.height = '0px'
-    sandbox.style.overflow = 'hidden'
-    document.body.appendChild(sandbox)
-  }
+  const release = defaultStyleUsers === 0 ? acquireDefaultStyleScope() : null
+  try {
+    let sandbox = defaultStyleSandbox
+    if (!sandbox) {
+      sandbox = document.createElement('div')
+      sandbox.id = 'snapdom-sandbox'
+      sandbox.setAttribute('data-snapdom-sandbox', 'true')
+      sandbox.setAttribute('aria-hidden', 'true')
+      sandbox.style.position = 'absolute'
+      sandbox.style.left = '-9999px'
+      sandbox.style.top = '-9999px'
+      sandbox.style.width = '0px'
+      sandbox.style.height = '0px'
+      sandbox.style.overflow = 'hidden'
+      defaultStyleSandbox = sandbox
+      document.body.appendChild(sandbox)
+    }
 
-  const el = document.createElement(tagName)
-  el.style.all = 'initial'
-  sandbox.appendChild(el)
+    const el = document.createElement(tagName)
+    el.style.all = 'initial'
+    sandbox.appendChild(el)
 
-  const styles = getComputedStyle(el)
-  const defaults = {}
-  for (let prop of styles) {
-    // ⬇️ Nuevo: filtramos ruido que no pinta y props dependientes de layout
-    if (shouldIgnoreProp(prop)) continue
-    const value = styles.getPropertyValue(prop)
-    defaults[prop] = value
-  }
+    try {
+      const styles = getComputedStyle(el)
+      const defaults = {}
+      for (let prop of styles) {
+        // ⬇️ Nuevo: filtramos ruido que no pinta y props dependientes de layout
+        if (shouldIgnoreProp(prop)) continue
+        const value = styles.getPropertyValue(prop)
+        defaults[prop] = value
+      }
 
-  sandbox.removeChild(el)
-  cache.defaultStyle.set(tagName, defaults)
-  return defaults
+      cache.defaultStyle.set(tagName, defaults)
+      return defaults
+    } finally { el.remove() }
+  } finally { release?.() }
 }
 
 /** Tokens "animation"/"transition" anywhere in the name (dash-bounded). */
@@ -247,7 +271,11 @@ export function getStyleKey(snapshot, tagName, sizedByContent = true, isFlexItem
   // A box whose own text cannot break gains nothing from the width guard below: it can only
   // clip sub-pixel, never re-wrap. Tag/display-independent (#491) — the softening gate is not.
   const noWrapBox = noWrapMode === 'nowrap' || noWrapMode === 'pre'
-  const frozenNoWrap = softenTag && sizedByContent && !isInline && noWrapBox
+  // Auto-sized ellipsis items must retain intrinsic sizing: fractional zoom can
+  // round a frozen used width below its text and replace visible glyphs with an
+  // ellipsis. Flex/grid still bounds these items; authored widths stay frozen.
+  const intrinsicEllipsisItem = isFlexItem && snapshot['text-overflow'] === 'ellipsis'
+  const frozenNoWrap = softenTag && sizedByContent && !isInline && noWrapBox && !intrinsicEllipsisItem
   const soften = softenTag && sizedByContent && !frozenNoWrap
 
   let keptMinWidth = false
@@ -311,7 +339,7 @@ export function getStyleKey(snapshot, tagName, sizedByContent = true, isFlexItem
  */
 export function collectUsedTagNames(root) {
   const tagSet = new Set()
-  if (root.nodeType !== Node.ELEMENT_NODE && root.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) {
+  if (root.nodeType !== globalThis.Node.ELEMENT_NODE && root.nodeType !== globalThis.Node.DOCUMENT_FRAGMENT_NODE) {
     return []
   }
   if (root.tagName) {
@@ -333,42 +361,69 @@ export function collectUsedTagNames(root) {
  * @returns {string} CSS string
  */
 export function generateDedupedBaseCSS(usedTagNames) {
-  const groups = new Map()
+  const steps = dedupedBaseCSSSteps(usedTagNames)
+  let step
+  do { step = steps.next() } while (!step.done)
+  return step.value
+}
 
-  for (let tagName of usedTagNames) {
-    // Resolve through getDefaultStyleForTag instead of reading cache.defaultStyle directly.
-    // That cache is an EvictingMap (MAX_DEFAULT_STYLE), and this runs at the very end of a
-    // capture: a document using more distinct tags than the cap has already had its earliest
-    // tags evicted. Reading the map raw returned undefined for exactly those tags and the
-    // `continue` silently emitted no base reset for them, so inside the foreignObject the UA
-    // stylesheet's defaults applied instead (h1..h3/p margins, hr borders, list padding…) and
-    // the capture reflowed taller than the source. Re-deriving is memoized and idempotent;
-    // NO_DEFAULTS_TAGS still yields {} and is dropped by the empty-key guard below.
-    const styles = getDefaultStyleForTag(tagName)
-    if (!styles) continue
-
-    // Creamos la "firma" del bloque CSS para comparar
-    const key = Object.entries(styles)
-      .map(([k, v]) => `${k}:${v};`)
-      .sort()
-      .join('')
-
-    if (!key) continue // <- evita reglas vacías (NO_DEFAULTS_TAGS produce {})
-
-    // Agrupamos por firma
-    if (!groups.has(key)) {
-      groups.set(key, [])
+/** Keep the public synchronous helper and capture's cooperative path on the
+ * same traversal. A tag's native default-style read remains one atomic step. */
+export async function generateDedupedBaseCSSCooperative(usedTagNames, scheduler) {
+  const steps = dedupedBaseCSSSteps(usedTagNames)
+  try {
+    let step = steps.next()
+    while (!step.done) {
+      let pause
+      while ((pause = scheduler?.checkpoint())) await pause
+      step = steps.next()
     }
-    groups.get(key).push(tagName)
-  }
+    return step.value
+  } finally { steps.return() }
+}
 
-  // Ahora generamos el CSS optimizado
-  let css = ''
-  for (let [styleBlock, tagList] of groups.entries()) {
-    css += `${tagList.join(',')} { ${styleBlock} }\n`
-  }
+function* dedupedBaseCSSSteps(usedTagNames) {
+  const release = acquireDefaultStyleScope()
+  try {
+    const groups = new Map()
 
-  return css
+    for (let tagName of usedTagNames) {
+      yield
+      // Resolve through getDefaultStyleForTag instead of reading cache.defaultStyle directly.
+      // That cache is an EvictingMap (MAX_DEFAULT_STYLE), and this runs at the very end of a
+      // capture: a document using more distinct tags than the cap has already had its earliest
+      // tags evicted. Reading the map raw returned undefined for exactly those tags and the
+      // `continue` silently emitted no base reset for them, so inside the foreignObject the UA
+      // stylesheet's defaults applied instead (h1..h3/p margins, hr borders, list padding…) and
+      // the capture reflowed taller than the source. Re-deriving is memoized and idempotent;
+      // NO_DEFAULTS_TAGS still yields {} and is dropped by the empty-key guard below.
+      const styles = getDefaultStyleForTag(tagName)
+      if (!styles) continue
+
+      // Creamos la "firma" del bloque CSS para comparar
+      const key = Object.entries(styles)
+        .map(([k, v]) => `${k}:${v};`)
+        .sort()
+        .join('')
+
+      if (!key) continue // <- evita reglas vacías (NO_DEFAULTS_TAGS produce {})
+
+      // Agrupamos por firma
+      if (!groups.has(key)) {
+        groups.set(key, [])
+      }
+      groups.get(key).push(tagName)
+    }
+
+    // Ahora generamos el CSS optimizado
+    let css = ''
+    for (let [styleBlock, tagList] of groups.entries()) {
+      yield
+      css += `${tagList.join(',')} { ${styleBlock} }\n`
+    }
+
+    return css
+  } finally { release() }
 }
 
 // -----------------------------------------------------------------------------

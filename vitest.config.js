@@ -5,6 +5,17 @@
 import { defineConfig } from 'vitest/config'
 import { snapDiffCommands } from '@zumer/snapdiff/vitest'
 import { createNetworkGate } from './vitest.network.mjs'
+import { build } from 'esbuild'
+import process from 'node:process'
+
+// The classic-script collision regression must exercise current source, never
+// a previously generated copy of the capture implementation.
+await build({
+  entryPoints: ['__tests__/fixtures/node-global-collision.entry.js'],
+  outfile: '__tests__/fixtures/node-global-collision.bundle.js',
+  bundle: true, format: 'iife', globalName: 'NodeCollisionCapture',
+  platform: 'browser', target: 'es2020',
+})
 
 const ALL_BROWSERS = ['chromium', 'firefox', 'webkit']
 const requested = process.env.BROWSER || 'chromium'

@@ -87,6 +87,12 @@ export interface ExcludeFonts {
 export interface SnapdomOptions {
   /** Fast path: skip small idle delays where safe. */
   fast?: boolean;
+  /** Cooperative processing budget per slice when fast is false. Defaults to 1 ms. */
+  budgetMs?: number;
+  /** Idle spare-time work by default; background tasks for isolated processing. */
+  schedulerMode?: 'idle' | 'background';
+  /** Cancels pending cooperative work and propagates the reason. */
+  signal?: AbortSignal;
   /** Output scale multiplier. Takes precedence over width/height. */
   scale?: number;
   /** Device pixel ratio to use for rasterization (defaults to `devicePixelRatio`). */

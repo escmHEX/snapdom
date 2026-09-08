@@ -351,23 +351,25 @@ it('does nothing when no blob: appears in style/style attribute', async () => {
   expect(outStyle).toContain('color:blue')
 })
 
-// 2) blobUrlToDataUrl: hit en cache.resource evita fetch/snapFetch
-it('uses cache.resource for blob: → data: without calling fetch', async () => {
+// Blob URLs belong to one capture; persistent bytes must not override them.
+it('does not use a persistent resource entry for a revocable blob URL', async () => {
   const wrap = document.createElement('div')
   const img = document.createElement('img')
-  img.src = 'blob:abc123'
+  const url = URL.createObjectURL(new Blob(['<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>'], { type: 'image/svg+xml' }))
+  img.src = url
   wrap.appendChild(img)
-
-  // Pre-cargar cache global
-  cache.resource.set('blob:abc123', 'data:text/plain;base64,Zm9v')
-
-  const spyFetch = vi.spyOn(globalThis, 'fetch').mockImplementation(() => { throw new Error('should not be called') })
-
-  const { clone } = await prepareClone(wrap)
-  const src = clone.querySelector('img')?.getAttribute('src') || ''
-  expect(src).toBe('data:text/plain;base64,Zm9v')
-
-  spyFetch.mockRestore()
+  cache.resource.set(url, 'data:text/plain;base64,Zm9v')
+  const spyFetch = vi.spyOn(globalThis, 'fetch')
+  try {
+    const { clone } = await prepareClone(wrap)
+    const src = clone.querySelector('img')?.getAttribute('src') || ''
+    expect(src).toContain('data:image/svg+xml')
+    expect(spyFetch).toHaveBeenCalled()
+  } finally {
+    spyFetch.mockRestore()
+    cache.resource.delete(url)
+    URL.revokeObjectURL(url)
+  }
 })
 
 // 3) blobUrlToDataUrl: fallo limpia memo y permite reintento

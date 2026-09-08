@@ -18,7 +18,7 @@ export function inlineExternalDefsAndSymbols(element, lookupRoot) {
 
   /** Collect all SVG roots under element (or element if it's an <svg>) */
   const svgRoots =
-    element instanceof SVGSVGElement
+    element instanceof (element.ownerDocument?.defaultView?.SVGSVGElement || SVGSVGElement)
       ? [element]
       : Array.from(element.querySelectorAll('svg'))
 

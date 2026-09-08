@@ -49,6 +49,9 @@ export function createContext(options = {}) {
     // Debug & perf
     debug: options.debug ?? false,
     fast: options.fast ?? true,
+    budgetMs: options.budgetMs ?? 1,
+    schedulerMode: options.schedulerMode ?? 'idle',
+    signal: options.signal,
     scale: options.scale ?? 1,
 
     // DOM filters

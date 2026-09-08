@@ -47,7 +47,7 @@ export function forceContentVisibility(root) {
   try {
     const all = root.querySelectorAll('*')
     for (const el of all) {
-      if (!(el instanceof HTMLElement)) continue
+      if (!(el instanceof (el.ownerDocument?.defaultView?.HTMLElement || HTMLElement))) continue
       const cv = el.style.contentVisibility || ''
       const cs = getComputedStyle(el)
       const computed = cs.contentVisibility || cs.getPropertyValue('content-visibility') || ''
@@ -57,7 +57,7 @@ export function forceContentVisibility(root) {
       }
     }
     // Check root itself
-    if (root instanceof HTMLElement) {
+    if (root instanceof (root.ownerDocument?.defaultView?.HTMLElement || HTMLElement)) {
       const cs = getComputedStyle(root)
       const computed = cs.contentVisibility || cs.getPropertyValue('content-visibility') || ''
       if (computed === 'auto') {

@@ -284,7 +284,7 @@ describe('captureDOM – #372 iframe CSS isolation', () => {
 // ──────────────────────────────────────────────────────────────────────────────
 //
 describe('captureDOM – #362 canvas Tailwind border', () => {
-  it('elements with border-width 0 get border:none in output (not border: 0 solid)', async () => {
+  it('normalizes zero-width canvas borders to no border in the rendered output', async () => {
     const { captureDOM } = await import('../src/core/capture.js')
 
     const wrap = document.createElement('div')
@@ -306,8 +306,19 @@ describe('captureDOM – #362 canvas Tailwind border', () => {
     document.body.removeChild(wrap)
 
     const svg = decodeSvg(url)
-    // Canvas becomes img; snapshot should normalize border: 0 solid → border: none
-    expect(svg).toMatch(/\bborder:\s*none\b/)
+    // CSSOM may serialize equivalent shorthand or longhand declarations. Verify
+    // the resulting border on the replacement image, not its spelling in CSS.
+    const rendered = new DOMParser().parseFromString(svg, 'image/svg+xml').documentElement
+    document.body.appendChild(rendered)
+    try {
+      const style = getComputedStyle(rendered.querySelector('foreignObject img'))
+      for (const side of ['top', 'right', 'bottom', 'left']) {
+        expect(style.getPropertyValue(`border-${side}-style`)).toBe('none')
+        expect(style.getPropertyValue(`border-${side}-width`)).toBe('0px')
+      }
+    } finally {
+      rendered.remove()
+    }
   })
 })
 
@@ -395,8 +406,8 @@ describe('captureDOM – embedFonts=true (no spies, effect-only)', () => {
 // Sandbox cleanup
 // ──────────────────────────────────────────────────────────────────────────────
 //
-describe('captureDOM – removes #snapdom-sandbox when absolute', () => {
-  it('cleans up the offscreen sandbox', async () => {
+describe('captureDOM sandbox ownership', () => {
+  it('preserves an absolute caller-owned element with the old sandbox id', async () => {
     const sandbox = document.createElement('div')
     sandbox.id = 'snapdom-sandbox'
     sandbox.style.position = 'absolute'
@@ -406,9 +417,13 @@ describe('captureDOM – removes #snapdom-sandbox when absolute', () => {
     vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue(rect(0, 0, 10, 10))
 
     const el = document.createElement('div')
-    const url = await captureDOM(el, { fast: true })
-    expect(url.startsWith('data:image/svg+xml')).toBe(true)
-    expect(document.getElementById('snapdom-sandbox')).toBeNull()
+    try {
+      const url = await captureDOM(el, { fast: true })
+      expect(url.startsWith('data:image/svg+xml')).toBe(true)
+      expect(document.getElementById('snapdom-sandbox')).toBe(sandbox)
+      expect(sandbox.isConnected).toBe(true)
+      expect(sandbox.style.position).toBe('absolute')
+    } finally { sandbox.remove() }
   })
 })
 

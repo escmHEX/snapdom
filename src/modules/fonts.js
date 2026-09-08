@@ -1,3 +1,4 @@
+import { canvasToDataURL } from '../utils/blob.js'
 /**
  * Utilities for handling and embedding web fonts and icon fonts.
  * @module fonts
@@ -5,7 +6,7 @@
 
 import { extractURL } from '../utils/helpers'
 import { getStyle } from '../utils/css.js'
-import { cache } from '../core/cache'
+import { cache, canPersistResourceURL } from '../core/cache'
 import { isIconFont } from '../modules/iconFonts.js'
 import { snapFetch } from './snapFetch.js'
 import { nextFrame } from '../utils/browser.js'
@@ -19,49 +20,47 @@ import { nextFrame } from '../utils/browser.js'
  * @param {string|number} fontWeight - The font weight
  * @param {number} [fontSize=32] - The font size in pixels
  * @param {string} [color="#000"] - The color to use
+ * @param {{document?: Document, dpr?: number}} [options] - Isolated font/layout context
  * @returns {Promise<{dataUrl:string,width:number,height:number}>} Data URL and intrinsic size
  */
-export async function iconToImage(unicodeChar, fontFamily, fontWeight, fontSize = 32, color = '#000') {
+export async function iconToImage(unicodeChar, fontFamily, fontWeight, fontSize = 32, color = '#000', options = {}) {
   fontFamily = fontFamily.replace(/^['"]+|['"]+$/g, '')
-  const dpr = window.devicePixelRatio || 1
+  const doc = options.document || document
+  const dpr = options.dpr ?? doc.defaultView?.devicePixelRatio ?? 1
+  try { await doc.fonts.ready } catch {}
 
-  try { await document.fonts.ready } catch {}
+  const span = doc.createElement('span')
+  const canvas = doc.createElement('canvas')
+  try {
+    span.setAttribute('data-snapdom-internal', '')
+    span.textContent = unicodeChar
+    span.style.cssText = 'position:absolute;visibility:hidden;line-height:1;white-space:nowrap;padding:0;margin:0;'
+    span.style.fontFamily = `"${fontFamily}"`
+    span.style.fontWeight = fontWeight || 'normal'
+    span.style.fontSize = `${fontSize}px`
+    // Use the captured document's font set and layout, never the application's
+    // current font state or body while processing a structural snapshot.
+    doc.body.appendChild(span)
+    const rect = span.getBoundingClientRect()
+    const width = Math.ceil(rect.width)
+    const height = Math.ceil(rect.height)
+    span.remove()
 
-  const span = document.createElement('span')
-  span.setAttribute('data-snapdom-internal', '')
-  span.textContent = unicodeChar
-  span.style.position = 'absolute'
-  span.style.visibility = 'hidden'
-  span.style.fontFamily = `"${fontFamily}"`
-  span.style.fontWeight = fontWeight || 'normal'
-  span.style.fontSize = `${fontSize}px`
-  span.style.lineHeight = '1'
-  span.style.whiteSpace = 'nowrap'
-  span.style.padding = '0'
-  span.style.margin = '0'
-  document.body.appendChild(span)
-
-  const rect = span.getBoundingClientRect()
-  const width = Math.ceil(rect.width)
-  const height = Math.ceil(rect.height)
-  document.body.removeChild(span)
-
-  const canvas = document.createElement('canvas')
-  canvas.width = Math.max(1, width * dpr)
-  canvas.height = Math.max(1, height * dpr)
-
-  const ctx = canvas.getContext('2d')
-  ctx.scale(dpr, dpr)
-  ctx.font = fontWeight ? `${fontWeight} ${fontSize}px "${fontFamily}"` : `${fontSize}px "${fontFamily}"`
-  ctx.textAlign = 'left'
-  ctx.textBaseline = 'top'
-  ctx.fillStyle = color
-  ctx.fillText(unicodeChar, 0, 0)
-
-  return {
-    dataUrl: canvas.toDataURL(),
-    width,
-    height
+    canvas.width = Math.max(1, width * dpr)
+    canvas.height = Math.max(1, height * dpr)
+    // This one-shot canvas is read back immediately for PNG encoding. CPU backing
+    // avoids a synchronous GPU flush while the application's renderer is active.
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    ctx.scale(dpr, dpr)
+    ctx.font = fontWeight ? `${fontWeight} ${fontSize}px "${fontFamily}"` : `${fontSize}px "${fontFamily}"`
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'top'
+    ctx.fillStyle = color
+    ctx.fillText(unicodeChar, 0, 0)
+    return { dataUrl: await canvasToDataURL(canvas), width, height }
+  } finally {
+    span.remove()
+    canvas.width = canvas.height = 0
   }
 }
 
@@ -407,8 +406,8 @@ async function inlineUrlsInCssBlock(cssBlock, baseHref, useProxy = '') {
     }
     if (isIconFont(abs)) continue
 
-    if (cache.resource?.has(abs)) {
-      cache.font?.add(abs)
+    if (canPersistResourceURL(abs) && cache.resource?.has(abs)) {
+      if (canPersistResourceURL(abs)) cache.font?.add(abs)
       out = out.replace(m[0], `url(${cache.resource.get(abs)})`)
       continue
     }
@@ -420,8 +419,8 @@ async function inlineUrlsInCssBlock(cssBlock, baseHref, useProxy = '') {
       const r = await snapFetch(abs, { as: 'dataURL', useProxy, silent: true })
       if (r.ok && typeof r.data === 'string') {
         const b64 = r.data
-        cache.resource?.set(abs, b64)
-        cache.font?.add(abs)
+        if (canPersistResourceURL(abs)) cache.resource?.set(abs, b64)
+        if (canPersistResourceURL(abs)) cache.font?.add(abs)
         out = out.replace(m[0], `url(${b64})`)
       }
     } catch {
@@ -572,6 +571,8 @@ async function collectFacesFromSheet(sheet, baseHref, emitFace, ctx) {
   }
 
   for (const rule of rules) {
+    const pause = ctx.scheduler?.checkpoint()
+    if (pause) await pause
     if (rule.type === CSSRule.IMPORT_RULE && rule.styleSheet) {
       const childHref = rule.href ? normalizeUrl(rule.href, baseHref) : baseHref
 
@@ -679,6 +680,8 @@ export async function embedCustomFonts({
   useProxy = '',
   fontStylesheetDomains = [],
   doc = document,
+  scheduler,
+  cachePolicy = 'soft',
 } = {}) {
   // ---------- Normalize inputs ----------
   if (!(required instanceof Set)) required = new Set()
@@ -783,8 +786,11 @@ function faceMatchesRequired(fam, styleSpec, weightSpec, stretchSpec) {
 
   const simpleExcluder = buildSimpleExcluder(exclude)
 
-  const cacheKey = buildFontsCacheKey(required, exclude, localFonts, useProxy, fontStylesheetDomains, doc)
-  if (cache.resource?.has(cacheKey)) {
+  // Font-face CSS depends on this document; soft captures reuse font bytes only.
+  // Otherwise every disposed snapshot leaves a unique multi-font CSS entry behind.
+  const cacheKey = cachePolicy === 'soft' || cachePolicy === 'disabled' ? null
+    : buildFontsCacheKey(required, exclude, localFonts, useProxy, fontStylesheetDomains, doc)
+  if (cacheKey && cache.resource?.has(cacheKey)) {
     return cache.resource.get(cacheKey)
   }
 
@@ -837,33 +843,41 @@ function faceMatchesRequired(fam, styleSpec, weightSpec, stretchSpec) {
 
   for (const link of linkNodes) {
     try {
-      if (isIconFont(link.href)) continue
+      if (!link.href.startsWith('data:') && isIconFont(link.href)) continue
 
       let cssText = ''
       let sameOrigin = false
       try { sameOrigin = new URL(link.href, location.href).origin === location.origin } catch {}
 
-      if (!sameOrigin) {
-        const allowedDomains = Array.isArray(fontStylesheetDomains) ? fontStylesheetDomains : []
-        if (!isLikelyFontStylesheet(link.href, requiredFamilies, allowedDomains)) continue
-      }
-
-      if (sameOrigin) {
-        const sheet = Array.from(doc.styleSheets).find(s => s.href === link.href)
+      // Accessible CSSOM is authoritative even for data/blob or CORS sheets.
+      // URL heuristics only restrict an additional external stylesheet fetch.
+      {
+        const sheet = link.sheet
         if (sheet) {
           try {
             const rules = sheet.cssRules || []
-            cssText = Array.from(rules).map(r => r.cssText).join('')
+            const text = []
+            for (const rule of rules) {
+              const pause = scheduler?.checkpoint()
+              if (pause) await pause
+              text.push(rule.cssText)
+            }
+            cssText = text.join('')
           } catch {
+            scheduler?.check()
             // fallback to fetch below
           }
         }
       }
 
       if (!cssText) {
+        if (!sameOrigin) {
+          const allowedDomains = Array.isArray(fontStylesheetDomains) ? fontStylesheetDomains : []
+          if (!isLikelyFontStylesheet(link.href, requiredFamilies, allowedDomains)) continue
+        }
         const res = await snapFetch(link.href, { as: 'text', useProxy })
         if (res?.ok && typeof res.data === 'string') cssText = res.data
-        if (isIconFont(link.href)) continue
+        if (!link.href.startsWith('data:') && isIconFont(link.href)) continue
       }
 
       // Flatten nested @import and rewrite relative urls per-level using link.href as base
@@ -903,6 +917,7 @@ function faceMatchesRequired(fam, styleSpec, weightSpec, stretchSpec) {
 
       if (facesOut.trim()) finalCSS += facesOut
     } catch {
+      scheduler?.check()
       console.warn('[snapDOM] Failed to process stylesheet:', link.href)
     }
   }
@@ -917,6 +932,7 @@ function faceMatchesRequired(fam, styleSpec, weightSpec, stretchSpec) {
     simpleExcluder: exclude ? buildSimpleExcluder(exclude) : null,
     useProxy,
     visitedSheets: new Set(),
+    scheduler,
     depth: 0
   }
 
@@ -932,6 +948,7 @@ function faceMatchesRequired(fam, styleSpec, weightSpec, stretchSpec) {
         ctx
       )
     } catch {
+      scheduler?.check()
       // cross-origin protected CSSOM; ignore (text pass already tried)
     }
   }
@@ -962,16 +979,16 @@ function faceMatchesRequired(fam, styleSpec, weightSpec, stretchSpec) {
 
       let b64 = f._snapdomSrc
       if (!String(b64).startsWith('data:')) {
-        if (cache.resource?.has(f._snapdomSrc)) {
+        if (canPersistResourceURL(f._snapdomSrc) && cache.resource?.has(f._snapdomSrc)) {
           b64 = cache.resource.get(f._snapdomSrc)
-          cache.font?.add(f._snapdomSrc)
-        } else if (!cache.font?.has(f._snapdomSrc)) {
+          if (canPersistResourceURL(f._snapdomSrc)) cache.font?.add(f._snapdomSrc)
+        } else {
           try {
             const r = await snapFetch(f._snapdomSrc, { as: 'dataURL', useProxy, silent: true })
             if (r.ok && typeof r.data === 'string') {
               b64 = r.data
-              cache.resource?.set(f._snapdomSrc, b64)
-              cache.font?.add(f._snapdomSrc)
+              if (canPersistResourceURL(f._snapdomSrc)) cache.resource?.set(f._snapdomSrc, b64)
+              if (canPersistResourceURL(f._snapdomSrc)) cache.font?.add(f._snapdomSrc)
             } else {
               continue
             }
@@ -1000,16 +1017,16 @@ function faceMatchesRequired(fam, styleSpec, weightSpec, stretchSpec) {
 
     let b64 = src
     if (!b64.startsWith('data:')) {
-      if (cache.resource?.has(src)) {
+      if (canPersistResourceURL(src) && cache.resource?.has(src)) {
         b64 = cache.resource.get(src)
-        cache.font?.add(src)
-      } else if (!cache.font?.has(src)) {
+        if (canPersistResourceURL(src)) cache.font?.add(src)
+      } else {
         try {
           const r = await snapFetch(src, { as: 'dataURL', useProxy, silent: true })
           if (r.ok && typeof r.data === 'string') {
             b64 = r.data
-            cache.resource?.set(src, b64)
-            cache.font?.add(src)
+            if (canPersistResourceURL(src)) cache.resource?.set(src, b64)
+            if (canPersistResourceURL(src)) cache.font?.add(src)
           } else {
             continue
           }
@@ -1025,7 +1042,7 @@ function faceMatchesRequired(fam, styleSpec, weightSpec, stretchSpec) {
   // ---------- Cache + return ----------
   if (finalCSS) {
     finalCSS = dedupeFontFaces(finalCSS)
-    cache.resource?.set(cacheKey, finalCSS)
+    if (cacheKey) cache.resource?.set(cacheKey, finalCSS)
   }
   return finalCSS
 }
@@ -1033,6 +1050,9 @@ function faceMatchesRequired(fam, styleSpec, weightSpec, stretchSpec) {
 // ----------------------------------------------------------------------------
 // Collectors for required variants and used codepoints
 // ----------------------------------------------------------------------------
+
+const TEXT_INPUT_TYPES = new Set(['text', 'search', 'tel', 'url', 'email', 'number', 'password'])
+const BUTTON_INPUT_TYPES = new Set(['button', 'submit', 'reset'])
 
 /**
  * Collects font variants AND used codepoints in one subtree walk.
@@ -1043,7 +1063,7 @@ function faceMatchesRequired(fam, styleSpec, weightSpec, stretchSpec) {
  * @param {((el: Element) => boolean)|null} [keep] - Clip mode: skip elements outside the window
  * @returns {{required: Set<string>, usedCodepoints: Set<number>}}
  */
-export function collectFontUsage(root, keep) {
+function* fontUsageSteps(root, keep) {
   const required = /* @__PURE__ */ new Set()
   const usedCodepoints = /* @__PURE__ */ new Set()
   if (!root) return { required, usedCodepoints }
@@ -1063,6 +1083,16 @@ export function collectFontUsage(root, keep) {
   }
   const visitElement = (el) => {
     addFromStyle(getStyle(el))
+    // Form text is mutable state, not a child text node. The clone uses value
+    // and only paints its placeholder while empty; stale textarea markup is unused.
+    const textControl = el.localName === 'textarea' || (el.localName === 'input' && TEXT_INPUT_TYPES.has(el.type))
+    if (textControl) {
+      if (el.value) pushText(el.type === 'password' ? '\u2022' : el.value)
+      else if (el.placeholder) {
+        pushText(el.placeholder)
+        addFromStyle(getStyle(el, '::placeholder'))
+      }
+    } else if (el.localName === 'input' && BUTTON_INPUT_TYPES.has(el.type)) pushText(el.value)
     for (const pseudo of ['::before', '::after']) {
       const cs = getStyle(el, pseudo)
       const c = cs && cs.content
@@ -1082,18 +1112,40 @@ export function collectFontUsage(root, keep) {
   }
 
   visitElement(root)
+  yield
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, null)
   while (walker.nextNode()) {
     const n = walker.currentNode
-    if (n.nodeType === Node.TEXT_NODE) {
+    if (n.nodeType === globalThis.Node.TEXT_NODE) {
       if (keep && n.parentElement && !keep(n.parentElement)) continue
+      if (n.parentElement?.localName === 'textarea') continue
       pushText(n.nodeValue || '')
     } else {
       if (keep && !keep(/** @type {Element} */ (n))) continue
       visitElement(/** @type {Element} */ (n))
     }
+    yield
   }
   return { required, usedCodepoints }
+}
+
+export function collectFontUsage(root, keep) {
+  const steps = fontUsageSteps(root, keep)
+  let step
+  do { step = steps.next() } while (!step.done)
+  return step.value
+}
+
+// Preserve the synchronous collectors for callers that need them; capture uses
+// the same traversal with its session budget, including pseudo-element styles.
+export async function collectFontUsageCooperative(root, keep, scheduler) {
+  const steps = fontUsageSteps(root, keep)
+  while (true) {
+    const pause = scheduler.checkpoint()
+    if (pause) await pause
+    const step = steps.next()
+    if (step.done) return step.value
+  }
 }
 
 /**

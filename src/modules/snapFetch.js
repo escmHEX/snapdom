@@ -1,5 +1,7 @@
+import { blobToDataURL } from '../utils/blob.js'
 // src/modules/snapFetch.js
 import { safeEncodeURI } from '../utils/helpers.js'
+import { TRANSPARENT_PNG } from '../utils/image.constants.js'
 
 /**
  * snapFetch — unified fetch for SnapDOM
@@ -101,7 +103,7 @@ function shouldProxy(url, useProxy) {
   try {
     const base = (typeof location !== 'undefined' && location.href) ? location.href : 'http://localhost/'
     const u = new URL(url, base)
-    return (typeof location !== 'undefined') ? (u.origin !== location.origin) : true
+    return (typeof location !== 'undefined') ? (u.origin !== globalThis.origin) : true
   } catch {
     // If URL can't be parsed but a proxy is configured, err on the side of proxying
     return !!useProxy
@@ -143,15 +145,6 @@ function applyProxy(url, useProxy) {
   // Fallback query param
   const sep = useProxy.includes('?') ? '&' : '?'
   return `${useProxy}${sep}url=${encodeURIComponent(url)}`
-}
-
-function blobToDataURL(blob) {
-  return new Promise((res, rej) => {
-    const fr = new FileReader()
-    fr.onload = () => res(String(fr.result || ''))
-    fr.onerror = () => rej(new Error('read_failed'))
-    fr.readAsDataURL(blob)
-  })
 }
 
 function makeKey(url, o) {
@@ -241,7 +234,7 @@ export async function snapFetch(url, options = {}) {
     if (as === 'dataURL') {
       return {
         ok: true,
-        data: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==',
+        data: TRANSPARENT_PNG,
         status: 200,
         url,
         fromCache: false,
@@ -275,7 +268,7 @@ export async function snapFetch(url, options = {}) {
     try {
       const base = (typeof location !== 'undefined' && location.href) ? location.href : 'http://localhost/'
       const u = new URL(url, base)
-      const sameOrigin = (typeof location !== 'undefined') && (u.origin === location.origin)
+      const sameOrigin = (typeof location !== 'undefined') && (u.origin === globalThis.origin)
       cred = sameOrigin ? 'include' : 'omit'
     } catch {
       cred = 'omit'

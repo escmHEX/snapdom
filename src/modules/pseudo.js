@@ -445,6 +445,8 @@ function resolvePseudoContentAndIncs(node, pseudo, baseCtx, siblingCounters) {
  * @returns {Promise<void>}
  */
 export async function inlinePseudoElements(source, clone, sessionCache, options) {
+  const pause = options.__scheduler?.checkpoint()
+  if (pause) await pause
   if ((source?.nodeType !== 1) || (clone?.nodeType !== 1)) return
   // #447: a textarea's value is its *child text content*, so wrapping characters in a
   // <span> (as the ::first-letter path does) drops them from the rendered value.
@@ -511,7 +513,7 @@ export async function inlinePseudoElements(source, clone, sessionCache, options)
         if (!isMeaningful) continue
 
         const textNode = Array.from(clone.childNodes).find(
-          (n) => n.nodeType === Node.TEXT_NODE && n.textContent?.trim().length > 0
+          (n) => n.nodeType === globalThis.Node.TEXT_NODE && n.textContent?.trim().length > 0
         )
         if (!textNode) continue
 
@@ -642,7 +644,7 @@ const hasExplicitContent = !isNoExplicitContent && cleanContent !== ''
       // ---- Content handling (icon-font glyphs / url() / text) ----
       if (isIconFont2 && cleanContent && cleanContent.length === 1) {
         const { dataUrl, width: w, height: h } =
-          await iconToImage(cleanContent, fontFamily, fontWeight, fontSize, color)
+          await iconToImage(cleanContent, fontFamily, fontWeight, fontSize, color, { document: source.ownerDocument, dpr: options.dpr })
         const imgEl = document.createElement('img')
         imgEl.src = dataUrl
         imgEl.style = `height:${fontSize}px;width:${(w / h) * fontSize}px;object-fit:contain;`
@@ -732,6 +734,8 @@ const hasExplicitContent = !isNoExplicitContent && cleanContent !== ''
         clone.appendChild(pseudoEl)
       }
     } catch (e) {
+      options.__scheduler?.check()
+      if (e?.name === 'AbortError') throw e
       console.warn(`[snapdom] Failed to capture ${pseudo} for`, source, e)
     }
   }

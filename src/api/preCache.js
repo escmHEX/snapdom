@@ -2,7 +2,7 @@
 import { getStyle, inlineSingleBackgroundEntry, precacheCommonTags, isSafari } from '../utils'
 import { embedCustomFonts, collectFontUsage, ensureFontsReady } from '../modules/fonts.js'
 import { snapFetch } from '../modules/snapFetch.js'
-import { cache, applyCachePolicy, EvictingMap } from '../core/cache.js'
+import { cache, applyCachePolicy, EvictingMap, canPersistResourceURL } from '../core/cache.js'
 import { URL_PROPS } from '../modules/background.js'
 
 /**
@@ -64,7 +64,7 @@ export async function preCache(root = document, options = {}) {
   // Prefetch <img> sources to dataURL and cache
   for (const img of imgEls) {
     const src = img?.currentSrc || img?.src
-    if (!src) continue
+    if (!src || !canPersistResourceURL(src)) continue
     if (!cache.image.has(src)) {
       const p = Promise.resolve()
         .then(async () => {

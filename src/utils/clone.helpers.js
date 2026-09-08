@@ -1,10 +1,11 @@
+import { createScheduler } from './scheduler.js'
 /**
  * Helper utilities for DOM cloning operations
  * @module utils/clone.helpers
  */
 
-import { idle, debugWarn, getStyle } from './index.js'
-import { cache, EvictingMap } from '../core/cache.js'
+import { debugWarn, getStyle } from './index.js'
+import { cache } from '../core/cache.js'
 import { snapFetch } from '../modules/snapFetch.js'
 import { inlineAllStyles } from '../modules/styles.js'
 import { findRealUrlForPicture, pickSrcsetCandidate } from '../modules/pictureResolver.js'
@@ -17,32 +18,16 @@ import { findRealUrlForPicture, pickSrcsetCandidate } from '../modules/pictureRe
  * @param {boolean} fast
  * @returns {Promise<(Node|null)[]>}
  */
-export function idleCallback(childList, callback, fast) {
-  if (fast) {
-    // Fast mode ran every child through deal()/idle() anyway (synchronously), paying an extra
-    // promise + two closures per node — tens of thousands of allocations on large trees.
-    // Call straight through; Promise.all keeps the same concurrency and ordering.
-    return Promise.all(childList.map((child) => new Promise((resolve) => callback(child, resolve))))
-  }
-  return Promise.all(childList.map((child) => {
-    return new Promise((resolve) => {
-      function deal() {
-        idle((deadline) => {
-          // Safari iOS doesn't expose IdleDeadline constructor; duck-type it instead
-          const hasIdleBudget = deadline && typeof deadline.timeRemaining === 'function'
-            ? deadline.timeRemaining() > 0
-            : true // setTimeout path or unknown object
-
-          if (hasIdleBudget) {
-            callback(child, resolve)
-          } else {
-            deal()
-          }
-        }, { fast })
-      }
-      deal()
-    })
-  }))
+export function idleCallback(childList, callback, fastOrOptions) {
+  const options = typeof fastOrOptions === 'object' ? fastOrOptions : { fast: !!fastOrOptions }
+  const invoke = child => new Promise((resolve, reject) => {
+    // Callback users may complete with done(), or return a promise. Observe both
+    // paths so a rejected async callback cannot leave capture pending forever.
+    const result = callback(child, resolve)
+    if (result && typeof result.then === 'function') result.then(resolve, reject)
+  })
+  if (options.fast && !options.signal) return Promise.all(childList.map(invoke))
+  return (options.__scheduler || createScheduler(options)).run(childList, invoke)
 }
 
 /** Add the current scope's slotted exclusion at the rightmost compound. */
@@ -273,7 +258,7 @@ export function markSlottedSubtree(root, scopeId) {
       el.setAttribute('data-sd-slotted', value ? `${value} ${scopeId}` : scopeId)
     }
   }
-  if (root.nodeType === Node.ELEMENT_NODE) mark(root)
+  if (root.nodeType === globalThis.Node.ELEMENT_NODE) mark(root)
   root.querySelectorAll?.('*').forEach(mark)
 }
 
@@ -627,56 +612,32 @@ export function createCheckboxRadioReplacement(node) {
 
 // ========== Blob URL Helpers ==========
 
-var _blobToDataUrlCache = new EvictingMap(80)
-
-/**
- * Read a blob: URL and return its data URL, with memoization + shared cache.
- * - Usa snapFetch(as:'dataURL') para convertir directo.
- * - Dedupea inflight guardando la promesa en el Map.
- * - Escribe también en cache.resource para reuso cross-módulo.
- * @param {string} blobUrl
- * @returns {Promise<string>} data URL
- */
-export async function blobUrlToDataUrl(blobUrl) {
-  // 1) Hit en cache global compartido
-  if (cache.resource?.has(blobUrl)) return cache.resource.get(blobUrl)
-
-  // 2) Hit en memo local (puede ser promesa o string resuelto)
-  if (_blobToDataUrlCache.has(blobUrl)) return _blobToDataUrlCache.get(blobUrl)
-
-  // 3) Crear promesa inflight y guardarla para dedupe
-  const p = (async () => {
-    const r = await snapFetch(blobUrl, { as: 'dataURL', silent: true })
-    if (!r.ok || typeof r.data !== 'string') {
+/** Read revocable URLs once per clone pass. A global memo would keep unique
+ * capture images alive and return stale bytes after the caller revokes a URL. */
+export async function blobUrlToDataUrl(blobUrl, memo = new Map()) {
+  if (memo.has(blobUrl)) return memo.get(blobUrl)
+  const pending = (async () => {
+    const result = await snapFetch(blobUrl, { as: 'dataURL', silent: true })
+    if (!result.ok || typeof result.data !== 'string') {
       throw new Error(`[snapDOM] Failed to read blob URL: ${blobUrl}`)
     }
-    cache.resource?.set(blobUrl, r.data)   // cache compartido
-    return r.data
+    return result.data
   })()
-
-  _blobToDataUrlCache.set(blobUrl, p)
-  try {
-    const data = await p
-    // Opcional: reemplazar promesa por string ya resuelto (menos retenciones)
-    _blobToDataUrlCache.set(blobUrl, data)
-    return data
-  } catch (e) {
-    // Si falla, limpiamos para permitir reintentos futuros
-    _blobToDataUrlCache.delete(blobUrl)
-    throw e
-  }
+  memo.set(blobUrl, pending)
+  try { return await pending }
+  catch (error) { memo.delete(blobUrl); throw error }
 }
 
 var BLOB_URL_RE = /\bblob:[^)"'\s]+/g
 
-async function replaceBlobUrlsInCssText(cssText) {
+async function replaceBlobUrlsInCssText(cssText, memo) {
   if (!cssText || cssText.indexOf('blob:') === -1) return cssText
   const uniques = Array.from(new Set(cssText.match(BLOB_URL_RE) || []))
   if (uniques.length === 0) return cssText
   let out = cssText
   for (const u of uniques) {
     try {
-      const d = await blobUrlToDataUrl(u)
+      const d = await blobUrlToDataUrl(u, memo)
       out = out.split(u).join(d)
     } catch { }
   }
@@ -723,6 +684,7 @@ function selfAndDescendants(root, selector) {
 export async function resolveBlobUrlsInTree(root, sessionCache = null) {
   if (!root) return
   const ctx = sessionCache
+  const memo = new Map()
 
   const imgs = selfAndDescendants(root, 'img')
   for (const img of imgs) {
@@ -730,7 +692,7 @@ export async function resolveBlobUrlsInTree(root, sessionCache = null) {
       const srcAttr = img.getAttribute('src')
       const effective = srcAttr || img.currentSrc || ''
       if (isBlobUrl(effective)) {
-        const data = await blobUrlToDataUrl(effective)
+        const data = await blobUrlToDataUrl(effective, memo)
         img.setAttribute('src', data)
       }
       const srcset = img.getAttribute('srcset')
@@ -740,7 +702,7 @@ export async function resolveBlobUrlsInTree(root, sessionCache = null) {
         for (const p of parts) {
           if (isBlobUrl(p.url)) {
             try {
-              p.url = await blobUrlToDataUrl(p.url)
+              p.url = await blobUrlToDataUrl(p.url, memo)
               changed = true
             } catch (e) {
               debugWarn(ctx, 'blobUrlToDataUrl for srcset item failed', e)
@@ -760,7 +722,7 @@ export async function resolveBlobUrlsInTree(root, sessionCache = null) {
       const XLINK_NS = 'http://www.w3.org/1999/xlink'
       const href = node.getAttribute('href') || node.getAttributeNS?.(XLINK_NS, 'href')
       if (isBlobUrl(href)) {
-        const d = await blobUrlToDataUrl(href)
+        const d = await blobUrlToDataUrl(href, memo)
         node.setAttribute('href', d)
         node.removeAttributeNS?.(XLINK_NS, 'href')
       }
@@ -774,7 +736,7 @@ export async function resolveBlobUrlsInTree(root, sessionCache = null) {
     try {
       const styleText = el.getAttribute('style')
       if (styleText && styleText.includes('blob:')) {
-        const replaced = await replaceBlobUrlsInCssText(styleText)
+        const replaced = await replaceBlobUrlsInCssText(styleText, memo)
         el.setAttribute('style', replaced)
       }
     } catch (e) {
@@ -787,7 +749,7 @@ export async function resolveBlobUrlsInTree(root, sessionCache = null) {
     try {
       const css = s.textContent || ''
       if (css.includes('blob:')) {
-        s.textContent = await replaceBlobUrlsInCssText(css)
+        s.textContent = await replaceBlobUrlsInCssText(css, memo)
       }
     } catch (e) {
       debugWarn(ctx, 'replaceBlobUrls in style tag failed', e)
@@ -801,7 +763,7 @@ export async function resolveBlobUrlsInTree(root, sessionCache = null) {
       try {
         const u = n.getAttribute(attr)
         if (isBlobUrl(u)) {
-          n.setAttribute(attr, await blobUrlToDataUrl(u))
+          n.setAttribute(attr, await blobUrlToDataUrl(u, memo))
         }
       } catch (e) {
         debugWarn(ctx, `resolveBlobUrls for ${attr} failed`, e)

@@ -7,9 +7,6 @@
   "module": "./dist/snapdom.mjs",
   "types": "./types/snapdom.d.ts",
   "sideEffects": false,
-  "workspaces": [
-    "packages/*"
-  ],
   "exports": {
     ".": {
       "types": "./types/snapdom.d.ts",
@@ -22,12 +19,23 @@
     },
     "./plugins": {
       "import": "./dist/plugins.mjs"
+    },
+    "./rasterize": {
+      "types": "./types/rasterize.d.ts",
+      "import": "./dist/rasterize.mjs"
+    },
+    "./snapshot": {
+      "types": "./types/snapshot.d.ts",
+      "import": "./dist/snapshot.mjs"
     }
   },
   "files": [
     "dist/",
     "types/snapdom.d.ts",
-    "README.md"
+    "types/snapshot.d.ts",
+    "types/rasterize.d.ts",
+    "README.md",
+    "AGARCITY_PATCHES.md"
   ],
   "scripts": {
     "compile": "node esbuild.config.mjs",
@@ -35,6 +43,7 @@
     "lint:fix": "eslint src __tests__ --ext .js --fix",
     "test:bundle": "npm run compile && node scripts/verify-legacy-bundle.mjs",
     "test:types": "tsc --noEmit",
+    "test:capture-fidelity": "vitest run --config vitest.capture-fidelity.config.js --browser.headless --reporter=verbose",
     "test": "npm run lint:fix && npm run test:types && npm run test:bundle && npx vitest run --browser.headless --reporter=verbose",
     "test:visual": "npx vitest run __tests__/visual.demos. --browser.headless --reporter=verbose",
     "test:firefox": "BROWSER=firefox npx vitest run --browser.headless --reporter=verbose",
@@ -46,7 +55,7 @@
     "site": "npm run compile && node scripts/serve-site.mjs",
     "bump:dry": "npx @zumerbox/bump -d",
     "bump": "npx @zumerbox/bump && npx @zumerbox/changelog",
-    "build": "npm run compile && npm pack",
+    "pack:dist": "npm run compile && npm pack",
     "release:push": "git add CHANGELOG.md && git commit -m \"Bumped version\" && git push --follow-tags"
   },
   "repository": {

@@ -1,5 +1,6 @@
 // src/exporters/toCanvas.js
-import { isSafari } from '../utils/browser'
+import { isSafari, nextFrame } from '../utils/browser'
+import { TRANSPARENT_PNG } from '../utils/image.constants.js'
 
 // #425: browsers cap how large an image they will decode and how large a canvas they
 // will back. Chrome/Firefox reject > 16384px on a side and a total decoded-image area
@@ -203,24 +204,29 @@ let _svgShadowProbe = null
 function probeSvgShadowSupport() {
   if (_svgShadowProbe) return _svgShadowProbe
   _svgShadowProbe = (async () => {
+    const img = new Image()
+    let canvas
     try {
       const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="20">' +
         '<foreignObject width="8" height="20"><div xmlns="http://www.w3.org/1999/xhtml" ' +
         'style="width:4px;height:4px;margin-top:8px;background:#000;box-shadow:0 8px 0 0 #000"></div></foreignObject></svg>'
-      const img = new Image()
       img.decoding = 'sync'
       img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
       await img.decode()
-      const c = document.createElement('canvas')
-      c.width = 8
-      c.height = 20
-      const ctx = c.getContext('2d', { willReadFrequently: true })
+      canvas = document.createElement('canvas')
+      canvas.width = 8
+      canvas.height = 20
+      const ctx = canvas.getContext('2d', { willReadFrequently: true })
       ctx.drawImage(img, 0, 0)
       const below = ctx.getImageData(2, 18, 1, 1).data[3] > 128
       const above = ctx.getImageData(2, 2, 1, 1).data[3] > 128
       return { native: below || above, flippedY: above && !below }
     } catch {
       return { native: false, flippedY: false }
+    } finally {
+      if (canvas) canvas.width = canvas.height = 0
+      // Cache only the capability result, never its SVG resource or pixel store.
+      await releaseDecodedImage(img, true)
     }
   })()
   return _svgShadowProbe
@@ -318,13 +324,16 @@ async function waitForImgPaint(img, verify) {
   img.setAttribute('data-snapdom-internal', '')
   img.style.cssText = 'position:fixed;left:-99999px;top:-99999px;pointer-events:none'
   document.body.appendChild(img)
+  let probe
   try {
-    const probe = document.createElement('canvas')
+    probe = document.createElement('canvas')
     probe.width = 16
     probe.height = 16
     // rAF with a timeout fallback: WebKit suspends rAF in occluded windows and
     // background tabs, and a capture must not hang there.
-    const frame = () => new Promise(r => { requestAnimationFrame(r); setTimeout(r, 50) })
+    const frame = () => document.visibilityState === 'hidden'
+      ? new Promise(resolve => setTimeout(resolve, 50))
+      : nextFrame(50)
     const pctx = probe.getContext('2d', { willReadFrequently: true })
     if (!pctx) {
       await frame()
@@ -342,88 +351,13 @@ async function waitForImgPaint(img, verify) {
       await frame()
     }
   } finally {
+    if (probe) probe.width = probe.height = 0
     try { img.remove() } catch { /* ok */ }
   }
 }
 
-/**
- * Rasterize SVG (o data URL) en un canvas respetando width/height + scale.
- * Soporta aplanar un background color sin canvas intermedio.
- * @param {string} url
- * @param {{
- *   width?:number,
- *   height?:number,
- *   scale?:number,
- *   dpr?:number,
- *   meta?:object,
- *   crop?:{x:number,y:number,width:number,height:number},
- *   backgroundColor?: string // <- NUEVO: color opcional para aplanar fondo
- * }} options
- * @returns {Promise<HTMLCanvasElement>}
- */
-export async function toCanvas(url, options) {
-  let { width: optW, height: optH, scale = 1, dpr = 1, meta = {}, backgroundColor, crop = null } = options
-
-  // SVG payloads: the old path decoded the whole multi-MB data URL just to read the <svg>
-  // header (#425 clamp check) and again for the Safari box-shadow rewrite, re-encoding after
-  // each. Peek the header without decoding the payload; only when a transform is actually
-  // needed (oversize clamp or Safari shadow fix) decode ONCE, transform on text, re-encode ONCE.
-  // NOTE: must stay a data: URL — Chromium taints the canvas when a foreignObject SVG is
-  // drawn from a blob: URL, which would break every toDataURL/toBlob export downstream.
-  let src = url
-  let shadowNaturalOnly = false
-  let needsPaintVerify = false
-  // Cropping is a viewBox rewrite, so it only exists for the serialized SVG payload.
-  // Any other source would silently rasterize whole; for a document exporter paging
-  // through a capture that means a full-page bitmap where a page slice was requested,
-  // which is worse than not exporting at all. Fail with the same loudness as a
-  // malformed crop window instead of quietly ignoring the option.
-  if (crop && !isSvgDataURL(url)) {
-    throw new RangeError('[snapdom] canvas crop requires an SVG capture payload')
-  }
-  if (isSvgDataURL(url)) {
-    const head = (peekSvgHeader(url).match(/<svg\b[^>]*>/i) || [])[0] || ''
-    const w = parseFloat((head.match(/\bwidth="([\d.]+)/i) || [])[1])
-    const h = parseFloat((head.match(/\bheight="([\d.]+)/i) || [])[1])
-    const oversized = Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0 &&
-      Math.min(1, MAX_RASTER_SIDE / w, MAX_RASTER_SIDE / h, Math.sqrt(MAX_RASTER_AREA / (w * h))) < 1
-    if (crop || oversized || isSafari()) {
-      try {
-        let svgText = decodeSvgFromDataURL(url)
-        if (crop) svgText = cropSvgText(svgText, crop)
-        if (isSafari()) {
-          const fixed = await fixSafariShadows(svgText)
-          svgText = fixed.svg
-          shadowNaturalOnly = fixed.naturalOnly
-          // Embedded fonts / nested raster images are the resources WebKit paints late
-          // (#219770/#394) — only then is the verified-draw ladder worth waiting on.
-          needsPaintVerify = /@font-face|data:image\//i.test(svgText)
-        }
-        // A crop can turn an oversized source into a safe page-sized decode. Run
-        // the clamp on the transformed header, not on the original full document.
-        if (oversized || crop) svgText = clampSvgTextRasterSize(svgText) // #425
-        src = encodeSvgToDataURL(svgText)
-      } catch (error) {
-        if (crop) throw error
-        src = url
-      }
-    }
-  }
-
-  const img = new Image()
-  img.loading = 'eager'
-  img.decoding = 'sync'
-  img.crossOrigin = 'anonymous'
-  img.src = src
-  await img.decode()
-
-  if (isSafari()) {
-    await waitForImgPaint(img, needsPaintVerify)
-  }
-
-  const natW = img.naturalWidth
-  const natH = img.naturalHeight
-
+function canvasOutputSize(natW, natH, options) {
+  const { width: optW, height: optH, scale = 1, dpr = 1, meta = {}, crop = null } = options
   // Prefer the rasterized viewBox (vbW/vbH, post-bleed) over the pre-bleed
   // content box (w0/h0): under outerShadows an asymmetric shadow/blur/outline
   // bleeds unevenly, so w0/h0's aspect ratio no longer matches the actual
@@ -462,47 +396,269 @@ export async function toCanvas(url, options) {
   outW = outW * scale
   outH = outH * scale
 
-  // #425: the device canvas is outW*dpr × outH*dpr; dpr (which defaults to devicePixelRatio,
-  // i.e. 2 on Retina) can push a within-decode-limit capture past the canvas cap. Clamp the
-  // whole draw so allocation/drawImage don't fail, preserving aspect ratio.
+  // Clamp the physical output, including DPR, before allocating either raster.
   const devW = outW * dpr, devH = outH * dpr
   const over = Math.max(devW / MAX_RASTER_SIDE, devH / MAX_RASTER_SIDE, Math.sqrt((devW * devH) / MAX_RASTER_AREA))
-  if (over > 1) {
-    console.warn(
-      `[snapDOM] Output ${Math.round(devW)}×${Math.round(devH)}px exceeds the browser canvas ` +
-      `limit (${MAX_RASTER_SIDE}px/side); downscaling. Lower \`scale\`/\`dpr\` or set \`width\`/\`height\`.`
-    )
-    outW /= over
-    outH /= over
+  if (over > 1) { outW /= over; outH /= over }
+  return { outW, outH, devW, devH, over }
+}
+
+// Keep the SVG coordinate system and aspect ratio fixed while increasing native
+// raster density. WebKit's shadow-safe 1:1 draw must not upscale CSS-size pixels.
+function zoomForeignObjectRaster(svg, density) {
+  const doc = new DOMParser().parseFromString(svg, 'image/svg+xml')
+  const root = doc.documentElement
+  const foreignObjects = [...root.children].filter(node => node.localName === 'foreignObject')
+  // Only generated captures own this wrapper contract. Inserting wrappers into
+  // arbitrary SVG would change selectors and inheritance; retain its prior
+  // natural-size raster followed by bitmap resampling instead.
+  if (!foreignObjects.length || foreignObjects.some(fo =>
+    ![...fo.children].some(node => node.hasAttribute('data-snapdom-wrapper')))) return null
+  const box = root.getAttribute('viewBox').trim().split(/[\s,]+/).map(Number)
+  root.setAttribute('viewBox', `0 0 ${box[2] * density} ${box[3] * density}`)
+  for (const child of [...root.children]) {
+    if (child.localName !== 'foreignObject') {
+      if (['defs', 'style', 'title', 'desc', 'metadata'].includes(child.localName)) continue
+      const group = doc.createElementNS('http://www.w3.org/2000/svg', 'g')
+      group.setAttribute('transform', `translate(${-box[0] * density} ${-box[1] * density}) scale(${density})`)
+      root.insertBefore(group, child)
+      group.appendChild(child)
+      continue
+    }
+    const fo = child
+    const dimensions = {}
+    for (const key of ['x', 'y', 'width', 'height']) {
+      const value = fo.getAttribute(key)
+      const axisSize = key === 'x' || key === 'width' ? box[2] : box[3]
+      dimensions[key] = value?.endsWith('%') ? parseFloat(value) * axisSize / 100 : parseFloat(value || '0')
+      const origin = key === 'x' ? box[0] : key === 'y' ? box[1] : 0
+      fo.setAttribute(key, String((dimensions[key] - origin) * density))
+    }
+    const wrapper = [...fo.children].find(node => node.hasAttribute('data-snapdom-wrapper'))
+    // CSS zoom scales layout and shadows together. SVG viewBox scale misplaces
+    // positioned WebKit layers; CSS transform scale instead loses text shadows.
+    const oldZoom = wrapper.style.zoom
+    const zoom = oldZoom?.endsWith('%') ? parseFloat(oldZoom) / 100 : parseFloat(oldZoom) || 1
+    wrapper.style.setProperty('zoom', String(zoom * density), 'important')
+    // A zero transform anchors fixed descendants to the same logical box as the
+    // original foreignObject. Existing wrapper transforms retain their semantics.
+    if (!wrapper.style.transform || wrapper.style.transform === 'none') {
+      wrapper.style.setProperty('transform', 'translate(0px, 0px)', 'important')
+    }
+  }
+  return new XMLSerializer().serializeToString(root)
+}
+
+function setShadowRasterDensity(svg, options) {
+  const head = svg.match(/<svg\b[^>]*>/i)
+  if (!head) return { svg }
+  const tag = head[0]
+  const width = parseFloat((tag.match(/\bwidth="([\d.]+)/i) || [])[1])
+  const height = parseFloat((tag.match(/\bheight="([\d.]+)/i) || [])[1])
+  if (!(width > 0 && height > 0)) return { svg }
+  const { outW, outH } = canvasOutputSize(width, height, options)
+  const dpr = options.dpr ?? 1
+  const density = Math.min(
+    // Fractional CSS zoom changes WebKit inline baselines in SVGImage. Decode
+    // at an integer density, then resample pixels to the requested output size.
+    // At DPR 1.25 this trades 2.56x raster area for stable text positioning.
+    Math.ceil(Math.max(1, outW * dpr / width, outH * dpr / height)),
+    MAX_RASTER_SIDE / width, MAX_RASTER_SIDE / height,
+    Math.sqrt(MAX_RASTER_AREA / (width * height))
+  )
+  if (density <= 1) return { svg }
+  let next = tag
+    .replace(/(\bwidth=")[\d.]+/i, `$1${width * density}`)
+    .replace(/(\bheight=")[\d.]+/i, `$1${height * density}`)
+  if (!/\bviewBox=/i.test(tag)) next = next.replace(/>$/, ` viewBox="0 0 ${width} ${height}">`)
+  let resized = svg.replace(tag, next)
+  if (/<foreignObject\b/i.test(svg)) {
+    resized = zoomForeignObjectRaster(resized, density)
+    if (resized === null) return { svg }
+  }
+  return { svg: resized, logicalSize: { width, height } }
+}
+
+function decodeImage(img, signal) {
+  const decoded = img.decode()
+  if (!signal) return decoded
+  return new Promise((resolve, reject) => {
+    const finish = (settle, value) => { signal.removeEventListener('abort', abort); settle(value) }
+    const abort = () => finish(reject, signal.reason || new DOMException('Capture aborted', 'AbortError'))
+    signal.addEventListener('abort', abort, { once: true })
+    // Consume the native promise even after cancellation. The caller's finally
+    // replaces src and awaits its load, cancelling the old request before release.
+    decoded.then(value => finish(resolve, value), error => finish(reject, error))
+    if (signal.aborted) abort()
+  })
+}
+
+async function releaseDecodedImage(img, preserveOriginalError) {
+  // Removing src creates Chromium's broken-image shadow tree and registers a
+  // document-owned ViewportChangeListener that retains this detached image.
+  // A valid tiny raster releases the SVG without creating that fallback tree.
+  let loaded, loadFailed
+  const cleared = new Promise((resolve, reject) => {
+    loaded = () => { if (img.currentSrc === TRANSPARENT_PNG) resolve() }
+    loadFailed = () => reject(new Error('Unable to release the decoded image'))
+    img.addEventListener('load', loaded)
+    img.addEventListener('error', loadFailed, { once: true })
+  })
+  img.src = TRANSPARENT_PNG
+  // Firefox may deliver the previous SVG's load after decode has resolved.
+  // Accept only the replacement request before releasing its image owner.
+  // Successful load commits the replacement and releases the old SVG resource.
+  // Do not request decoding for this never-drawn cleanup image: decode can stay
+  // pending in a hidden raster frame even after its load event has completed.
+  try { await cleared } catch (cleanupError) {
+    if (!preserveOriginalError) throw cleanupError
+  } finally {
+    img.removeEventListener('load', loaded)
+    img.removeEventListener('error', loadFailed)
+  }
+}
+
+/**
+ * Rasterize SVG (o data URL) en un canvas respetando width/height + scale.
+ * Soporta aplanar un background color sin canvas intermedio.
+ * @param {string} url
+ * @param {{
+ *   width?:number,
+ *   height?:number,
+ *   scale?:number,
+ *   dpr?:number,
+ *   meta?:object,
+ *   crop?:{x:number,y:number,width:number,height:number},
+ *   backgroundColor?: string
+ * }} options
+ * @returns {Promise<HTMLCanvasElement>}
+ */
+export async function toCanvas(url, options) {
+  // Serialization, SVG loading and rasterization are separate browser operations.
+  // Reuse the capture session budget instead of chaining them in one microtask turn.
+  const beforeLoad = options.__scheduler?.checkpoint()
+  if (beforeLoad) await beforeLoad
+  const { dpr = 1, backgroundColor, crop = null } = options
+
+  // SVG payloads: the old path decoded the whole multi-MB data URL just to read the <svg>
+  // header (#425 clamp check) and again for the Safari box-shadow rewrite, re-encoding after
+  // each. Peek the header without decoding the payload; only when a transform is actually
+  // needed (oversize clamp or Safari shadow fix) decode ONCE, transform on text, re-encode ONCE.
+  // NOTE: must stay a data: URL — Chromium taints the canvas when a foreignObject SVG is
+  // drawn from a blob: URL, which would break every toDataURL/toBlob export downstream.
+  let src = url
+  let shadowNaturalOnly = false
+  let needsPaintVerify = false
+  let logicalSvgSize
+  // Cropping is a viewBox rewrite, so it only exists for the serialized SVG payload.
+  // Any other source would silently rasterize whole; for a document exporter paging
+  // through a capture that means a full-page bitmap where a page slice was requested,
+  // which is worse than not exporting at all. Fail with the same loudness as a
+  // malformed crop window instead of quietly ignoring the option.
+  if (crop && !isSvgDataURL(url)) {
+    throw new RangeError('[snapdom] canvas crop requires an SVG capture payload')
+  }
+  if (isSvgDataURL(url)) {
+    const head = (peekSvgHeader(url).match(/<svg\b[^>]*>/i) || [])[0] || ''
+    const w = parseFloat((head.match(/\bwidth="([\d.]+)/i) || [])[1])
+    const h = parseFloat((head.match(/\bheight="([\d.]+)/i) || [])[1])
+    const oversized = Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0 &&
+      Math.min(1, MAX_RASTER_SIDE / w, MAX_RASTER_SIDE / h, Math.sqrt(MAX_RASTER_AREA / (w * h))) < 1
+    if (crop || oversized || isSafari()) {
+      try {
+        let svgText = decodeSvgFromDataURL(url)
+        if (crop) svgText = cropSvgText(svgText, crop)
+        if (isSafari()) {
+          const fixed = await fixSafariShadows(svgText)
+          svgText = fixed.svg
+          shadowNaturalOnly = fixed.naturalOnly
+          // Embedded fonts / nested raster images are the resources WebKit paints late
+          // (#219770/#394) — only then is the verified-draw ladder worth waiting on.
+          needsPaintVerify = /@font-face|data:image\//i.test(svgText)
+        }
+        // A crop can turn an oversized source into a safe page-sized decode. Run
+        // the clamp on the transformed header, not on the original full document.
+        if (oversized || crop) svgText = clampSvgTextRasterSize(svgText) // #425
+        if (shadowNaturalOnly) {
+          const density = setShadowRasterDensity(svgText, options)
+          svgText = density.svg
+          logicalSvgSize = density.logicalSize
+        }
+        src = encodeSvgToDataURL(svgText)
+      } catch (error) {
+        if (crop) throw error
+        src = url
+      }
+    }
   }
 
-  const canvas = document.createElement('canvas')
-  canvas.width = outW * dpr
-  canvas.height = outH * dpr
-  canvas.style.width = `${outW}px`
-  canvas.style.height = `${outH}px`
+  const img = new Image()
+  let canvas
+  let failed = false
+  try {
+    img.loading = 'eager'
+    img.decoding = 'sync'
+    img.crossOrigin = 'anonymous'
+    img.src = src
+    await decodeImage(img, options.signal)
 
-  const ctx = canvas.getContext('2d')
-  if (dpr !== 1) ctx.scale(dpr, dpr)
+    if (isSafari()) {
+      await waitForImgPaint(img, needsPaintVerify)
+    }
 
-  if (backgroundColor) {
-    ctx.save()
-    ctx.fillStyle = backgroundColor
-    ctx.fillRect(0, 0, outW, outH)
-    ctx.restore()
+    const beforeDraw = options.__scheduler?.checkpoint()
+    if (beforeDraw) await beforeDraw
+
+    const natW = img.naturalWidth
+    const natH = img.naturalHeight
+
+    const { outW, outH, devW, devH, over } = canvasOutputSize(
+      logicalSvgSize?.width ?? natW, logicalSvgSize?.height ?? natH, options)
+    if (over > 1) {
+      console.warn(
+        `[snapDOM] Output ${Math.round(devW)}×${Math.round(devH)}px exceeds the browser canvas ` +
+        `limit (${MAX_RASTER_SIDE}px/side); downscaling. Lower \`scale\`/\`dpr\` or set \`width\`/\`height\`.`
+      )
+    }
+
+    canvas = document.createElement('canvas')
+    canvas.width = outW * dpr
+    canvas.height = outH * dpr
+    canvas.style.width = `${outW}px`
+    canvas.style.height = `${outH}px`
+
+    // Export-only callers may prefer software rasterization to avoid blocking
+    // a shared GPU before transferring pixels for encoding.
+    const ctx = canvas.getContext('2d', { willReadFrequently: options.willReadFrequently === true })
+    if (dpr !== 1) ctx.scale(dpr, dpr)
+
+    if (backgroundColor) {
+      ctx.save()
+      ctx.fillStyle = backgroundColor
+      ctx.fillRect(0, 0, outW, outH)
+      ctx.restore()
+    }
+
+    if (shadowNaturalOnly && (Math.round(outW * dpr) !== natW || Math.round(outH * dpr) !== natH)) {
+      // WebKit corrupts box-/text-shadows when the svg rasterizes at a non-natural
+      // scale: render 1:1 first, then resample pixels (canvas→canvas draws never
+      // re-rasterize the svg). Density was raised before decode for high-DPR output.
+      const tmp = document.createElement('canvas')
+      tmp.width = natW
+      tmp.height = natH
+      try {
+        tmp.getContext('2d').drawImage(img, 0, 0)
+        ctx.drawImage(tmp, 0, 0, outW, outH)
+      } finally { tmp.width = tmp.height = 0 }
+    } else {
+      ctx.drawImage(img, 0, 0, outW, outH)
+    }
+    return canvas
+  } catch (error) {
+    failed = true
+    if (canvas) canvas.width = canvas.height = 0
+    throw error
+  } finally {
+    await releaseDecodedImage(img, failed)
   }
-
-  if (shadowNaturalOnly && (Math.round(outW * dpr) !== natW || Math.round(outH * dpr) !== natH)) {
-    // WebKit corrupts box-/text-shadows when the svg rasterizes at a non-natural
-    // scale: render 1:1 first, then resample pixels (canvas→canvas draws never
-    // re-rasterize the svg). Trades a bit of sharpness for correct shadows.
-    const tmp = document.createElement('canvas')
-    tmp.width = natW
-    tmp.height = natH
-    tmp.getContext('2d').drawImage(img, 0, 0)
-    ctx.drawImage(tmp, 0, 0, outW, outH)
-  } else {
-    ctx.drawImage(img, 0, 0, outW, outH)
-  }
-  return canvas
 }

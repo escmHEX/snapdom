@@ -1,9 +1,9 @@
 import { snapshotTextTruncation } from './lineClamp.js'
 import { getStyleKey, softensWidth, softenNeedsAutoWidth, shouldIgnoreProp, getStyle } from '../utils/index.js'
-import { cache } from '../core/cache.js'
+import { cache, EvictingMap, normalizeCachePolicy } from '../core/cache.js'
 
 const snapshotCache = new WeakMap()
-const snapshotKeyCache = new Map()
+const snapshotKeyCache = new EvictingMap(2000)
 /** PERF-4: evict snapshotKeyCache when it grows beyond this size.
  *  Each entry stores a long CSS signature string → key string. In SPAs with many
  *  unique element styles, this Map can grow without bound and leak memory. */
@@ -260,7 +260,9 @@ function hasSpecifiedWidth(el, cs, isFlexItem) {
   // A box that hugs its content is sized by it — `width: max-content` / `fit-content` land here
   // too, and those must keep softening. For a block-level box, also require that the used width
   // is not simply the available width (that is what plain `width: auto` gives).
-  if (!contentNarrowerThanBox(el, cs)) return false
+  const whiteSpace = cs.whiteSpace
+  const preserveOverflow = cs.textOverflow === 'ellipsis' && (whiteSpace === 'nowrap' || whiteSpace === 'pre')
+  if (!contentNarrowerThanBox(el, cs, preserveOverflow)) return false
   return isFlexItem || usedWidthDiffersFromAvailable(el, cs)
 }
 
@@ -279,7 +281,7 @@ function isContentWidthKeyword(value) {
  * @param {Element} el
  * @param {CSSStyleDeclaration} cs
  */
-function contentNarrowerThanBox(el, cs) {
+function contentNarrowerThanBox(el, cs, preserveOverflow = false) {
   const box = el.getBoundingClientRect().width -
     (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0) -
     (parseFloat(cs.borderLeftWidth) || 0) - (parseFloat(cs.borderRightWidth) || 0)
@@ -302,7 +304,10 @@ function contentNarrowerThanBox(el, cs) {
     if (r.right > right) right = r.right
   }
   if (right === -Infinity) return false
-  return (right - left) < box - 0.5
+  // Without Typed OM, an already overflowing nowrap box may have an authored
+  // width narrower than its text. Preserve its existing ellipsis and bound; only
+  // fitting intrinsic text needs protection from new raster-rounding overflow.
+  return (right - left) < box - 0.5 || (preserveOverflow && (right - left) > box)
 }
 
 /**
@@ -332,19 +337,28 @@ function styleSignature(snap) {
   __snapshotSig.set(snap, sig)
   return sig
 }
-function getSnapshot(el, preStyle = null, options = {}) {
-  const rec = snapshotCache.get(el)
+function getSnapshot(el, preStyle = null, options = {}, session) {
+  // Soft caches belong to this capture, so CSSOM, media and option changes between
+  // captures need no persistent observer or font listener.
+  const soft = options.cache === 'soft' || options.cache === true || options.cache == null
+  const snapshots = soft
+    ? (session.snapshots || (session.snapshots = new WeakMap()))
+    : snapshotCache
+  const rec = snapshots.get(el)
   // The snapshot content depends on embedFonts (extra font props) and excludeStyleProps
   // (skipped props), but __epoch only bumps on DOM/font mutation — not option changes.
   // Capturing the same element twice with different options must not reuse the snapshot
   // (#348). excludeStyleProps is compared by reference: a fresh value misses safely.
   const ef = !!(options && options.embedFonts)
   const ex = (options && options.excludeStyleProps) || null
-  if (rec && rec.epoch === __epoch && rec.embedFonts === ef && rec.excludeStyleProps === ex) return rec.snapshot
+  if (rec && (soft || !rec.soft) && rec.epoch === __epoch && rec.embedFonts === ef && rec.excludeStyleProps === ex) return rec.snapshot
   const style = preStyle || getComputedStyle(el)
   const snap = snapshotComputedStyleFull(style, options)
   stripHeightForWrappers(el, style, snap)
-  snapshotCache.set(el, { epoch: __epoch, snapshot: snap, embedFonts: ef, excludeStyleProps: ex })
+  const record = { epoch: __epoch, snapshot: snap, embedFonts: ef, excludeStyleProps: ex, soft }
+  snapshots.set(el, record)
+  // Background processing consumes the last snapshot; it never reuses style values.
+  snapshotCache.set(el, record)
   return snap
 }
 
@@ -402,9 +416,9 @@ export async function inlineAllStyles(source, clone, sessionOrCtx, opts) {
   if (source.tagName === 'STYLE') return
 
   const ctx = _resolveCtx(sessionOrCtx, opts)
-  const resetMode = (ctx.options && ctx.options.cache) || 'auto'
+  const resetMode = normalizeCachePolicy(ctx.options?.cache)
 
-  if (resetMode !== 'disabled') setupInvalidationOnce(document.documentElement)
+  if (resetMode === 'auto' || resetMode === 'full') setupInvalidationOnce(document.documentElement)
 
   if (resetMode === 'disabled' && !ctx.session.__bumpedForDisabled) {
     bumpEpoch()
@@ -445,7 +459,7 @@ export async function inlineAllStyles(source, clone, sessionOrCtx, opts) {
     clone.style.setProperty('animation', 'none', 'important')
   }
 
-  const snap = getSnapshot(source, pre, ctx.options)
+  const snap = getSnapshot(source, pre, ctx.options, session)
 
   const flexItem = isFlexOrGridItem(source)
 
@@ -488,10 +502,16 @@ export async function inlineAllStyles(source, clone, sessionOrCtx, opts) {
       session.reconcileRisk = (session.reconcileRisk || 0) + 1
     }
   }
-  let key = persist.snapshotKeyCache.get(sig)
+  // Soft mode retains resource bytes across captures, not DOM-dependent CSS
+  // signatures. Keep interning within this session without clearing another
+  // capture's cache or retaining each new viewport/style after it completes.
+  const keys = resetMode === 'soft'
+    ? (session.snapshotKeyCache || (session.snapshotKeyCache = new Map()))
+    : persist.snapshotKeyCache
+  let key = keys.get(sig)
   if (key === undefined) {
     key = getStyleKey(snap, tag, sizedByContent, flexItem)
-    persist.snapshotKeyCache.set(sig, key)
+    keys.set(sig, key)
   }
   session.styleMap.set(clone, key)
 }
@@ -607,7 +627,7 @@ function autoContentHeight(el) {
  */
 function stripHeightForWrappers(el, cs, snap) {
   // 1) Respeta height inline del autor
-  if (el instanceof HTMLElement && el.style && el.style.height) return
+  if (el instanceof (el.ownerDocument?.defaultView?.HTMLElement || HTMLElement) && el.style && el.style.height) return
 
   // 2) Solo div/section/article/main/aside/header/footer/nav (no ol/ul/li: layout de listas)
   const tag = el.tagName && el.tagName.toLowerCase()

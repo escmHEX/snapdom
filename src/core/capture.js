@@ -1,3 +1,5 @@
+import { acquireDefaultStyleScope, generateDedupedBaseCSSCooperative } from '../utils/css.js'
+import { createScheduler } from '../utils/scheduler.js'
 /**
  * Core logic for capturing DOM elements as SVG data URLs.
  * @module capture
@@ -8,8 +10,8 @@ import { inlineImages } from '../modules/images.js'
 import { inlineBackgroundImages } from '../modules/background.js'
 import { emulateBackdropFilters } from '../modules/backdropFilter.js'
 import { ligatureIconToImage } from '../modules/iconFonts.js'
-import { idle, collectUsedTagNames, generateDedupedBaseCSS, isSafari, getStyle } from '../utils/index.js'
-import { embedCustomFonts, collectFontUsage, ensureFontsReady } from '../modules/fonts.js'
+import { collectUsedTagNames, isSafari, getStyle } from '../utils/index.js'
+import { embedCustomFonts, collectFontUsageCooperative, ensureFontsReady } from '../modules/fonts.js'
 import { cache, applyCachePolicy } from '../core/cache.js'
 import { lineClampTree } from '../modules/lineClamp.js'
 import { runHook, getGlobalPlugins, normalizePlugin } from './plugins.js'
@@ -23,7 +25,7 @@ import {
   shrinkAutoSizeBoxes,
   estimateKeptHeight,
   limitDecimals,
-  collectScrollbarCSS,
+  collectScrollbarCSSCooperative,
   reconcileCloneLayout,
   resolveClipRect,
   composeResidual2D
@@ -117,8 +119,28 @@ function checkBurstAdvice(element) {
  * @returns {Promise<string>} Promise that resolves to an SVG data URL
  */
 export async function captureDOM(element, options) {
+  const releaseDefaults = acquireDefaultStyleScope()
+  try {
+    return await captureDOMOwned(element, options)
+  } finally {
+    // Soft sessions own detached documents. Keep resource caches, but never pin
+    // the last captured tree through the global fallback session after completion.
+    const session = options?.__session
+    if (options?.cache === 'soft' && session) {
+      if (cache.session.nodeMap === session.nodeMap) cache.session.nodeMap = new Map()
+      if (cache.session.styleMap === session.styleMap) cache.session.styleMap = new Map()
+      if (cache.session.styleCache === session.styleCache) cache.session.styleCache = new WeakMap()
+    }
+    releaseDefaults()
+  }
+}
+
+async function captureDOMOwned(element, options) {
   if (!element) throw new Error('Element cannot be null or undefined')
+  options.__scheduler = createScheduler(options)
+  options.__scheduler.check()
   applyCachePolicy(options.cache)
+  if (options.cache === 'soft') cache.computedStyle = new WeakMap()
   // cache.session is reassigned at every capture start: snapshot THIS capture's maps in the
   // same synchronous tick, before any await, or a concurrently started capture swaps them
   // and both captures share one nodeMap (double scroll-compensation, cross-contaminated CSS).
@@ -129,7 +151,6 @@ export async function captureDOM(element, options) {
   }
   if (!options.burst) checkBurstAdvice(element)
   options.__resolveNodeHooks = collectResolveNodeHooks(options)
-  const fast = options.fast
   const outerTransforms = options.outerTransforms !== false   // default: true
 
   const outerShadows = !!options.outerShadows
@@ -186,7 +207,7 @@ export async function captureDOM(element, options) {
       neutralizeRootZoom(state.element, clone)
     }
   }
-  lineClampTree(clone, nodeMap, classCSS)
+  await lineClampTree(clone, nodeMap, classCSS, options)
 
   // AFTERCLONE
   state = { clone, classCSS, styleCache, nodeMap, ...state }
@@ -196,21 +217,23 @@ export async function captureDOM(element, options) {
   // Shrink pass when excludeMode/filterMode === 'remove' dropped clone children
   if (state.options?.excludeMode === 'remove' || state.options?.filterMode === 'remove') {
     try {
-      shrinkAutoSizeBoxes(state.element, state.clone, state.styleCache)
+      shrinkAutoSizeBoxes(state.element, state.clone, state.styleCache, state.nodeMap)
     } catch (e) {
       console.warn('[snapdom] shrink pass failed:', e)
     }
   }
   try {
-    await ligatureIconToImage(state.clone, state.element, state.nodeMap)
+    await ligatureIconToImage(state.clone, state.element, state.nodeMap, { dpr: state.options.dpr })
   } catch { /* non-blocking */ }
 
   // Asset phases are network/decode-bound and independent: images ∥ backgrounds ∥ fonts run
   // concurrently (they were serialized before, stacking their network latencies). Compress
   // depends on the inlined data URLs, so it waits for images+backgrounds only.
-  const runIdle = (fn) => new Promise((resolve, reject) => {
-    idle(() => { Promise.resolve().then(fn).then(resolve, reject) }, { fast })
-  })
+  const runIdle = async (fn) => {
+    let pause
+    while ((pause = options.__scheduler.checkpoint())) await pause
+    return fn()
+  }
 
   const assetsPhase = (async () => {
     await Promise.all([
@@ -244,7 +267,11 @@ export async function captureDOM(element, options) {
                  r.bottom >= preClipRect.top - 200 && r.top <= preClipRect.bottom + 200
         } catch { return true }
       } : null
-      const { required, usedCodepoints } = collectFontUsage(state.element, clipKeep)
+      // The clone map excludes display:none/excluded/culled subtrees. Their text
+      // must not activate font subsets that the exported document never uses.
+      const fontSources = new Set(state.nodeMap.values())
+      const fontKeep = el => fontSources.has(el) && (!clipKeep || clipKeep(el))
+      const { required, usedCodepoints } = await collectFontUsageCooperative(state.element, fontKeep, options.__scheduler)
       if (isSafari()) {
         const families = new Set(
           Array.from(required).map((k) => String(k).split('__')[0]).filter(Boolean)
@@ -259,7 +286,9 @@ export async function captureDOM(element, options) {
         localFonts: state.options.localFonts,
         useProxy: state.options.useProxy,
         fontStylesheetDomains: state.options.fontStylesheetDomains,
-        doc: ownerDoc
+        doc: ownerDoc,
+        scheduler: options.__scheduler,
+        cachePolicy: options.cache
       })
     })
   }
@@ -271,21 +300,15 @@ export async function captureDOM(element, options) {
   if (cache.baseStyle.has(tagKey)) {
     baseCSS = cache.baseStyle.get(tagKey)
   } else {
-    await new Promise((resolve) => {
-      idle(() => {
-        baseCSS = generateDedupedBaseCSS(usedTags)
-        cache.baseStyle.set(tagKey, baseCSS)
-        resolve()
-      }, { fast })
-    })
+    baseCSS = await generateDedupedBaseCSSCooperative(usedTags, options.__scheduler)
+    cache.baseStyle.set(tagKey, baseCSS)
   }
   // #334: inject ::-webkit-scrollbar rules so custom scrollbar styles apply in capture
-  const scrollbarCSS = collectScrollbarCSS(state.element?.ownerDocument || document)
+  const scrollbarCSS = await collectScrollbarCSSCooperative(state.element?.ownerDocument || document, options.__scheduler)
   state = { fontsCSS, baseCSS, scrollbarCSS, ...state }
   await runHook('beforeRender', state)
 
-  await new Promise((resolve) => {
-    idle(() => {
+  await runIdle(() => {
       const csEl = getStyle(state.element)
 
       const rect = state.element.getBoundingClientRect()
@@ -507,8 +530,11 @@ export async function captureDOM(element, options) {
       // raster boundary and browsers shave the last 1-2px at some zoom/display scales
       // (Safari always did; Chrome at zoom ≠ 100%). Pad the viewBox so rotated corners
       // never touch the edge. Was Safari-only; the shaving is not.
-      const basePad = hasTFBBox(state.element) ? 2 : 0
-      const extraPad = !outerTransforms ? 1 : 0
+      const transformedBBox = hasTFBBox(state.element)
+      const basePad = transformedBBox ? 2 : 0
+      // An untransformed root already has exact capture edges. Padding it would
+      // shift and rescale every pixel when exported at its requested dimensions.
+      const extraPad = transformedBBox && !outerTransforms ? 1 : 0
       const pad = limitDecimals(basePad + extraPad)
 
       // Ceil so a fractional content extent (rotated bbox, fractional bleed) is never
@@ -552,6 +578,7 @@ export async function captureDOM(element, options) {
 
       const container = document.createElement('div')
       container.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml')
+      container.setAttribute('data-snapdom-wrapper', '')
       // #372: isolate wrapper from iframe CSS cascade (e.g. div { border: 10px solid red })
       // The container spans the whole fo, so the (rotated/bled) content never overflows
       // its border-box — standalone-SVG Chromium clips fo content at the container box.
@@ -611,14 +638,10 @@ export async function captureDOM(element, options) {
       svgString = svgHeader + foString + svgFooter
       dataURL = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgString)}`
       state = { svgString, dataURL, ...state }
-      resolve()
-    }, { fast })
   })
   // afterRender(context)
   await runHook('afterRender', state)
 
-  const sandbox = document.getElementById('snapdom-sandbox')
-  if (sandbox && sandbox.style.position === 'absolute') sandbox.remove()
   return state.dataURL
 }
 
