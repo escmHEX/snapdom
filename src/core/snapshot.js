@@ -193,7 +193,12 @@ export function snapshot(element, options = {}) {
         text: href && immutable.has(href) ? null : freezeSheet(sheet, href || baseURL),
         media: sheet.media.mediaText, disabled: sheet.disabled })
     }
-    if (owner.adoptedStyleSheets?.length) throw new Error('Document adoptedStyleSheets are not supported')
+    // Constructed sheets cascade after document sheets without adding DOM nodes.
+    // Freeze their CSSOM now; neither later edits nor removal may alter the capture.
+    for (const sheet of owner.adoptedStyleSheets || []) {
+      sheets.push({ adopted: true, text: freezeSheet(sheet, sheet.href || baseURL),
+        media: sheet.media.mediaText, disabled: sheet.disabled })
+    }
     for (let index = 0; index < sourceNodes.length; index++) {
       const source = sourceNodes[index], copy = copiedNodes[index]
       const inRoot = source === element || element.contains(source)
@@ -319,7 +324,7 @@ async function waitForResources(doc, timeout, signal, scheduler) {
 }
 
 async function rewriteMaterializedSheets(doc, attribute, timeout, signal, scheduler) {
-  for (const sheet of Array.from(doc.styleSheets)) {
+  for (const sheet of [...doc.styleSheets, ...doc.adoptedStyleSheets]) {
     try { await rewriteSheet(sheet, attribute, scheduler); continue } catch (error) {
       if (error.name !== 'SecurityError' || !sheet.href || !sheet.ownerNode) throw error
     }
@@ -365,6 +370,7 @@ export async function materializeSnapshot(value, options = {}) {
     sanitizeCopiedNode(node)
   })
   const providedDocument = options.document
+  const originalAdoptedSheets = providedDocument ? [...providedDocument.adoptedStyleSheets] : null
   const originalTree = providedDocument?.documentElement
   if (providedDocument) {
     if (!providedDocument.defaultView || !originalTree?.isConnected) throw new TypeError('Expected a connected provided document')
@@ -387,6 +393,7 @@ export async function materializeSnapshot(value, options = {}) {
     disposed = true
     if (frame) frame.remove()
     else if (materializedTree) {
+      providedDocument.adoptedStyleSheets = originalAdoptedSheets
       if (materializedTree.parentNode === providedDocument) providedDocument.replaceChild(originalTree, materializedTree)
       materializedTree.replaceChildren()
     }
@@ -410,7 +417,14 @@ export async function materializeSnapshot(value, options = {}) {
     const head = tree.querySelector('head')
     for (const base of tree.querySelectorAll('base')) base.remove()
     const base = doc.createElement('base'); base.href = state.baseURL; head.prepend(base)
+    const adoptedSheets = []
     await scheduler.run(state.sheets, async sheet => {
+      if (sheet.adopted) {
+        const adopted = new doc.defaultView.CSSStyleSheet({ media: sheet.media, disabled: sheet.disabled })
+        adopted.replaceSync(await resolveFrozenSheet(sheet.text, scheduler))
+        adoptedSheets.push(adopted)
+        return
+      }
       const original = copies.get(sheet.node)
       const node = original.cloneNode(false)
       if (sheet.href) { node.rel = 'stylesheet'; node.href = sheet.href }
@@ -425,6 +439,7 @@ export async function materializeSnapshot(value, options = {}) {
       original.replaceWith(node)
       copies.set(sheet.node, node)
     })
+    doc.adoptedStyleSheets = adoptedSheets
     await scheduler.run(state.records, record => {
       const node = copies.get(record.node)
       for (const property of ['value', 'checked', 'indeterminate', 'selected']) if (property in record) node[property] = record[property]

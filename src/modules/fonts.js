@@ -936,7 +936,7 @@ function faceMatchesRequired(fam, styleSpec, weightSpec, stretchSpec) {
     depth: 0
   }
 
-  for (const sheet of doc.styleSheets) {
+  for (const sheet of [...doc.styleSheets, ...doc.adoptedStyleSheets]) {
     if (sheet.href && linkNodes.some(l => l.href === sheet.href)) continue
     try {
       const rootHref = sheet.href || (location.origin + '/')

@@ -106,3 +106,28 @@ describe('portable acquired snapshots', () => {
     expect(doc.documentElement).toBe(original)
   })
 })
+
+
+it('freezes adopted CSSOM, cascade, media and disabled state across transfer without adding elements', async () => {
+  const before = [...document.adoptedStyleSheets];
+  cleanup.push(() => { document.adoptedStyleSheets = before });
+  const root = document.createElement('div'); root.id = 'adopted-fixture';
+  root.innerHTML = '<style>#adopted-fixture{color:red}</style><span>Frozen</span>';
+  document.body.append(root); cleanup.push(() => root.remove());
+  const first = new CSSStyleSheet(); first.replaceSync('#adopted-fixture{color:blue}');
+  const second = new CSSStyleSheet(); second.replaceSync('#adopted-fixture{color:rgb(1,2,3)} #adopted-fixture > span:last-child{padding-left:13px}');
+  const disabled = new CSSStyleSheet({disabled:true}); disabled.replaceSync('#adopted-fixture{color:green}');
+  const media = new CSSStyleSheet({media:'not all'}); media.replaceSync('#adopted-fixture{color:yellow}');
+  document.adoptedStyleSheets = [...before, first, second, disabled, media];
+  const value = snapshot(root); cleanup.push(() => value.dispose());
+  second.replaceSync('#adopted-fixture{color:purple}'); document.adoptedStyleSheets = before;
+  const packet = await serializeSnapshot(value, {fast:true}); cleanup.push(() => packet.dispose());
+  const restored = await deserializeSnapshot(packet.payload, {fast:true}); cleanup.push(() => restored.dispose());
+  const result = await materializeSnapshot(restored, {fast:true}); cleanup.push(() => result.dispose());
+  const doc = result.element.ownerDocument, view = doc.defaultView;
+  expect(view.getComputedStyle(result.element).color).toBe('rgb(1, 2, 3)');
+  expect(view.getComputedStyle(result.element.querySelector('span')).paddingLeft).toBe('13px');
+  expect(result.element.children.length).toBe(2);
+  expect(doc.adoptedStyleSheets.length).toBe(before.length + 4);
+  expect(document.adoptedStyleSheets).toEqual(before);
+});

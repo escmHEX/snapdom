@@ -5,6 +5,14 @@ This fork is based on upstream SnapDOM 2.24.15, commit
 remain unchanged. All corrections are generic HTML/CSS behavior; the downstream
 application supplies its own surface, canvas snapshots and upload contracts.
 
+## Adopted document stylesheets
+
+Structural snapshots freeze constructed document stylesheets in adoption order,
+including CSSOM rules, media and disabled state. Materialization recreates them
+in the isolated document without inserting elements that alter selectors. Frozen
+selectors and used font discovery include these sheets; disposal restores any
+preexisting adopted sheets of a supplied document. All work belongs to a capture.
+
 ## Snapshot ownership
 
 Animation acquisition indexes targets and pseudoelements by identity. Repeated
