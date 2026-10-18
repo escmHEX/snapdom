@@ -502,7 +502,9 @@ export async function inlineAllStyles(source, clone, sessionOrCtx, opts) {
   let sig = styleSignature(snap)
   let sizedByContent = true
   if (softensWidth(tag, (snap.display || '').toLowerCase())) {
-    sizedByContent = hasRenderedContent(source)
+    // Intrinsic widths are emitted directly, so neither content probes nor
+    // width softening/reconciliation bookkeeping can change their style key.
+    sizedByContent = !snap.__intrinsicWidth && hasRenderedContent(source)
     // #484: softening only reproduces the box when its `width` is auto. On a blockified box in
     // normal flow (`span{display:block;width:16px}`) the min-width floor cannot cap the stretch,
     // and a flex/grid item gets no floor at all (#406) — both lost the authored width. Treat an

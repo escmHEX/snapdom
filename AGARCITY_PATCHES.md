@@ -225,3 +225,5 @@ These reads occur in the cooperatively scheduled style-copy pass on the isolated
 snapshot. Acquisition, scheduler budgets, resource timeouts, cancellation and the
 live application render loop are unchanged. The Typed OM value is read once per
 style snapshot and reused by the existing width-preservation decision.
+Known intrinsic widths also skip the older content probes and reconciliation-risk
+bookkeeping: their width is emitted directly, so those probes cannot affect it.
