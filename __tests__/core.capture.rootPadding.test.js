@@ -8,6 +8,23 @@ function svgRoot(result) {
 }
 
 describe('root raster padding', () => {
+  it('keeps the containing width of a stretched absolute capture root', async () => {
+    const parent = document.createElement('div')
+    parent.style.cssText = 'position:relative;display:flex;width:300px;height:80px'
+    parent.innerHTML = '<div style="position:absolute;inset:0"><div style="position:absolute;right:0;top:0;width:40px;height:40px;background:red"></div></div>'
+    document.body.append(parent)
+    let canvas
+    try {
+      const result = await snapdom(parent.firstElementChild, options)
+      canvas = await result.toCanvas({ width: 300, height: 80, dpr: 1 })
+      expect(Array.from(canvas.getContext('2d').getImageData(280, 20, 1, 1).data))
+        .toEqual([255, 0, 0, 255])
+    } finally {
+      parent.remove()
+      if (canvas) canvas.width = canvas.height = 0
+    }
+  })
+
   for (const transform of ['none', 'matrix(1,0,0,1,0,0)']) {
     it(`preserves exact dimensions and edge pixels for ${transform}`, async () => {
       const root = document.createElement('div')

@@ -180,7 +180,7 @@ const INLINE_SIZED_TAGS = new Set(['span', 'small', 'em', 'strong', 'b', 'i', 'u
 const TABLE_TAGS = new Set(['table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th'])
 // Replaced elements honor an explicit width even when display:inline (#436: an inline <img>
 // with object-fit lost its width and rendered empty), so they are never softened.
-const REPLACED_TAGS = new Set(['img', 'video', 'canvas', 'svg', 'iframe', 'embed', 'object', 'input', 'textarea', 'select'])
+export const REPLACED_TAGS = new Set(['img', 'video', 'canvas', 'svg', 'iframe', 'embed', 'object', 'input', 'textarea', 'select'])
 // Width longhands we never freeze as a hard value when softening (physical + logical).
 const HARD_WIDTH_PROPS = new Set(['width', 'max-width', 'inline-size', 'max-inline-size'])
 // Min-width longhands: kept verbatim when authored (or set to 0 by #406 on flex/grid items).

@@ -18,6 +18,52 @@ async function copy(root) {
 }
 
 describe('intrinsic width in frozen CSS', () => {
+  it.skipIf(typeof Element.prototype.computedStyleMap !== 'function')('lets an auto flex row grow with its intrinsic labels after raster metric drift', async () => {
+    const root = mount(document.createElement('div'))
+    root.style.cssText = 'width:600px;display:flex;flex-direction:column;align-items:flex-start;font:17px Arial'
+    root.innerHTML = '<div style="display:flex;gap:6px"><div style="display:flex;width:max-content;padding:0 10px;height:25px"><span>Score: 1689</span></div><div style="display:flex;width:max-content;padding:0 10px;height:25px"><span>Network: 3 KB/s</span></div></div>'
+    const clone = await copy(root)
+    // Native OS scaling changes SVG font metrics without changing CSS sizes.
+    // Model that drift in both trees: an auto row must still size to its children.
+    for (const tree of [root, clone]) {
+      for (const label of tree.querySelectorAll('span')) label.style.letterSpacing = '0.1px'
+    }
+    expect(clone.firstElementChild.getBoundingClientRect().width)
+      .toBeCloseTo(root.firstElementChild.getBoundingClientRect().width, 1)
+    for (const label of clone.querySelectorAll('span')) {
+      const range = document.createRange()
+      range.selectNodeContents(label)
+      expect(range.getClientRects().length).toBe(1)
+    }
+  })
+
+  it.skipIf(typeof Element.prototype.computedStyleMap !== 'function')('keeps auto margins available when centered table text grows', async () => {
+    const root = mount(document.createElement('div'))
+    root.style.cssText = 'width:300px;font:17px Arial'
+    root.innerHTML = '<span style="display:table;margin:auto">Restart time: 59 min</span>'
+    const clone = await copy(root)
+    for (const tree of [root, clone]) tree.firstElementChild.style.letterSpacing = '0.1px'
+    const native = root.firstElementChild.getBoundingClientRect()
+    const actual = clone.firstElementChild.getBoundingClientRect()
+    expect(actual.height).toBe(native.height)
+    expect(actual.width).toBeCloseTo(native.width, 1)
+    expect(actual.left - clone.getBoundingClientRect().left)
+      .toBeCloseTo(native.left - root.getBoundingClientRect().left, 1)
+  })
+
+  it.skipIf(typeof Element.prototype.computedStyleMap !== 'function')('keeps an absolute auto row anchored when its text grows', async () => {
+    const root = mount(document.createElement('div'))
+    root.style.cssText = 'position:relative;width:500px;height:100px;font:17px Arial'
+    root.innerHTML = '<div style="position:absolute;right:10px;top:0;display:flex"><span>0 people watching you</span></div>'
+    const clone = await copy(root)
+    for (const tree of [root, clone]) tree.firstElementChild.firstElementChild.style.letterSpacing = '0.2px'
+    const native = root.firstElementChild.getBoundingClientRect()
+    const actual = clone.firstElementChild.getBoundingClientRect()
+    expect(actual.width).toBeCloseTo(native.width, 1)
+    expect(actual.height).toBe(native.height)
+    expect(clone.getBoundingClientRect().right - actual.right).toBeCloseTo(10, 1)
+  })
+
   for (const width of ['max-content', 'min-content', 'fit-content']) {
     it(`preserves inline ${width} and its max-width constraint`, async () => {
       const root = mount(document.createElement('div'))

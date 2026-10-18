@@ -1,9 +1,13 @@
 import { snapshotTextTruncation } from './lineClamp.js'
 import { getStyleKey, softensWidth, softenNeedsAutoWidth, shouldIgnoreProp, getStyle } from '../utils/index.js'
-import { INTRINSIC_WIDTHS, SHRINK_TO_FIT_DISPLAYS } from '../utils/css.js'
+import { INTRINSIC_WIDTHS, SHRINK_TO_FIT_DISPLAYS, REPLACED_TAGS } from '../utils/css.js'
 import { cache, EvictingMap, normalizeCachePolicy } from '../core/cache.js'
 
 const snapshotCache = new WeakMap()
+const INSET_SIDES = ['top', 'right', 'bottom', 'left']
+const LOGICAL_INSETS = ['inset-block-start', 'inset-block-end', 'inset-inline-start', 'inset-inline-end']
+const MARGIN_SIDES = ['margin-top', 'margin-right', 'margin-bottom', 'margin-left']
+const LOGICAL_MARGINS = ['margin-block-start', 'margin-block-end', 'margin-inline-start', 'margin-inline-end']
 const snapshotKeyCache = new EvictingMap(2000)
 /** PERF-4: evict snapshotKeyCache when it grows beyond this size.
  *  Each entry stores a long CSS signature string → key string. In SPAs with many
@@ -333,7 +337,7 @@ function styleSignature(snap) {
   __snapshotSig.set(snap, sig)
   return sig
 }
-function getSnapshot(el, preStyle = null, options = {}, session) {
+function getSnapshot(el, preStyle = null, options = {}, session, flexItem = false) {
   // Soft caches belong to this capture, so CSSOM, media and option changes between
   // captures need no persistent observer or font listener.
   const soft = options.cache === 'soft' || options.cache === true || options.cache == null
@@ -354,19 +358,54 @@ function getSnapshot(el, preStyle = null, options = {}, session) {
   // returns a rounded used width. Freezing max-content as pixels can rewrap
   // text when SVGImage's fractional-zoom font metrics differ slightly.
   let computedWidth
-  if (snap.width && typeof el.computedStyleMap === 'function') {
-    const value = el.computedStyleMap().get('width')
+  const typed = typeof el.computedStyleMap === 'function' ? el.computedStyleMap() : null
+  if (snap.width && typed) {
+    const value = typed.get('width')
     if (value != null) computedWidth = String(value).trim().toLowerCase()
   }
   Object.defineProperty(snap, '__computedWidth', { value: computedWidth })
+  const outOfFlow = snap.position === 'absolute' || snap.position === 'fixed'
+  const autoOutOfFlowWidth = outOfFlow && computedWidth === 'auto' &&
+    (typed.get('left')?.value === 'auto' || typed.get('right')?.value === 'auto')
   const intrinsicWidth = INTRINSIC_WIDTHS.has(computedWidth) ||
-    (computedWidth === 'auto' && SHRINK_TO_FIT_DISPLAYS.has(snap.display))
+    (computedWidth === 'auto' && (SHRINK_TO_FIT_DISPLAYS.has(snap.display) ||
+      (((flexItem && !outOfFlow) || autoOutOfFlowWidth) && !REPLACED_TAGS.has(el.localName))))
   Object.defineProperty(snap, '__intrinsicWidth', { value: intrinsicWidth })
   if (intrinsicWidth) {
     snap.width = computedWidth
     const logicalWidth = (snap['writing-mode'] || 'horizontal-tb').startsWith('horizontal') ? 'inline-size' : 'block-size'
     if (snap[logicalWidth]) snap[logicalWidth] = computedWidth
   }
+  // Auto flex sizing and auto margins are layout inputs, not measured pixels.
+  // Freezing a content row or its centering margins leaves no room for the
+  // small text-metric changes produced by SVG images at native OS scaling.
+  // Reuse one Typed OM map; no measurements or live-page mutations are needed.
+  let autoMargins = 0
+  if (typed) {
+    for (let i = 0; i < MARGIN_SIDES.length; i++) {
+      const prop = MARGIN_SIDES[i]
+      if (snap[prop] && typed.get(prop)?.value === 'auto') {
+        snap[prop] = 'auto'
+        autoMargins |= 1 << i
+      }
+    }
+  }
+  if (autoMargins) for (const prop of LOGICAL_MARGINS) delete snap[prop]
+  Object.defineProperty(snap, '__autoMargins', { value: autoMargins })
+  // Auto insets must remain auto with an out-of-flow auto width. Freezing
+  // both opposing offsets otherwise stretches the row back to its old width.
+  let autoInsets = 0
+  if (outOfFlow && intrinsicWidth && typed) {
+    for (let i = 0; i < INSET_SIDES.length; i++) {
+      const prop = INSET_SIDES[i]
+      if (snap[prop] && typed.get(prop)?.value === 'auto') {
+        snap[prop] = 'auto'
+        autoInsets |= 1 << i
+      }
+    }
+  }
+  if (autoInsets) for (const prop of LOGICAL_INSETS) delete snap[prop]
+  Object.defineProperty(snap, '__autoInsets', { value: autoInsets })
   stripHeightForWrappers(el, style, snap)
   const record = { epoch: __epoch, snapshot: snap, embedFonts: ef, excludeStyleProps: ex, soft }
   snapshots.set(el, record)
@@ -472,7 +511,8 @@ export async function inlineAllStyles(source, clone, sessionOrCtx, opts) {
     clone.style.setProperty('animation', 'none', 'important')
   }
 
-  const snap = getSnapshot(source, pre, ctx.options, session)
+  const flexItem = isFlexOrGridItem(source)
+  const snap = getSnapshot(source, pre, ctx.options, session, flexItem)
   // Inline declarations outrank generated classes. Normalize their used width
   // to the same resolved keyword, including logical inline/block-size aliases.
   if (snap.__intrinsicWidth &&
@@ -482,7 +522,21 @@ export async function inlineAllStyles(source, clone, sessionOrCtx, opts) {
     if (clone.style.getPropertyValue(logicalWidth)) clone.style.setProperty(logicalWidth, snap.width)
   }
 
-  const flexItem = isFlexOrGridItem(source)
+  if (snap.__autoMargins && source.getAttribute?.('style')) {
+    // Physical sides already contain the resolved writing-mode/direction.
+    // Remove inline logical aliases so they cannot restore used pixel margins.
+    for (const prop of LOGICAL_MARGINS) clone.style.removeProperty(prop)
+    for (let i = 0; i < MARGIN_SIDES.length; i++) {
+      if (snap.__autoMargins & (1 << i)) clone.style.setProperty(MARGIN_SIDES[i], 'auto')
+    }
+  }
+
+  if (snap.__autoInsets && source.getAttribute?.('style')) {
+    for (const prop of LOGICAL_INSETS) clone.style.removeProperty(prop)
+    for (let i = 0; i < INSET_SIDES.length; i++) {
+      if (snap.__autoInsets & (1 << i)) clone.style.setProperty(INSET_SIDES[i], 'auto')
+    }
+  }
 
   // #406: foreignObject may resolve min-width:auto differently than normal DOM
   // for flex/grid items. Explicitly set min-width:0 on flex/grid items that have

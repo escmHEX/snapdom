@@ -229,3 +229,19 @@ Known intrinsic widths also skip the older content probes and reconciliation-ris
 bookkeeping: their width is emitted directly, so those probes cannot affect it.
 The acceptance suite includes the existing packed-row, fixed-width, replaced-element
 and root-zoom regressions as well as the intrinsic-sizing cases.
+
+Auto flex/grid items and shrink-to-fit positioned containers retain automatic
+widths too. Automatic margins and positioned insets remain layout inputs instead
+of frozen used pixels; otherwise centering or opposing offsets can constrain a
+row to its old text metrics. Replaced elements and absolute roots stretched by
+two explicit horizontal insets retain their measured dimensions. Physical sides
+are resolved through Typed OM; logical aliases cannot override those values.
+These values share the existing per-capture style snapshot and computed-style
+map, without live-page measurements or additional render-loop work.
+
+Native Chromium device scaling must be tested separately from Playwright's DPR
+emulation: on Windows, a native 150% scale with viewport:null reproduced font
+wrapping that an emulated deviceScaleFactor:1.5 did not. Layout regressions model
+that metric drift, and the raster root regression checks the right-edge pixels
+after root normalization. Real client validation additionally compares native
+browser screenshots with exported PNGs at native 100%, 125% and 150% scales.
