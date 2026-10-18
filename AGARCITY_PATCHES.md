@@ -227,3 +227,5 @@ live application render loop are unchanged. The Typed OM value is read once per
 style snapshot and reused by the existing width-preservation decision.
 Known intrinsic widths also skip the older content probes and reconciliation-risk
 bookkeeping: their width is emitted directly, so those probes cannot affect it.
+The acceptance suite includes the existing packed-row, fixed-width, replaced-element
+and root-zoom regressions as well as the intrinsic-sizing cases.

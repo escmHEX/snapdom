@@ -21,6 +21,7 @@ config.test.include = [
   'snapshot-transfer', 'snapFetch.effective-origin',
   'styles.intrinsic-ellipsis',
   'styles.intrinsic-sizing',
+  'snapdom.widthSoftening', 'snapdom.issue491', 'snapdom.issue484', 'core.capture.zoomRoot',
   'export.shadow-probe-lifetime',
 ].map(name => `__tests__/${name}.test.js`)
 export default config

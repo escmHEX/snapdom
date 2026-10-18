@@ -138,7 +138,10 @@ describe('#491 a packed inline row does not wrap in the capture', () => {
     expect(cloneSum - liveSum).toBeLessThanOrEqual(parentGrowth + 1e-9)
   })
 
-  it('freezes a nowrap box at its exact width, with no round-up to accumulate', async () => {
+  it('freezes an authored nowrap width exactly, with no round-up to accumulate', async () => {
+    // Auto widths stay intrinsic when Typed OM is available. Exercise the
+    // numeric-width guard with an authored width, not a serialization detail.
+    host.querySelector('button').style.width = '154.703125px'
     const svg = svgOf(await snapdom.toRaw(host))
     const width = ruleFor(svg, 'button').match(/(?:^|;)\s*width:\s*([\d.]+)px/)
     expect(width).not.toBeNull()
