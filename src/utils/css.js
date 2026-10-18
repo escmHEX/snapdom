@@ -137,10 +137,6 @@ const NO_PAINT_EXACT = new Set([
   'container-name',
   'container-type',
   'timeline-scope',
-  // #369: CSS zoom — getComputedStyle() widths/heights already reflect post-zoom layout values.
-  // Capturing zoom in the class causes double-zoom inside SVG foreignObject → blank sections.
-  // Excluding zoom prevents this; dimensions are already correct as-is.
-  'zoom',
   // WebKit-only draft prop (CSS Fill & Stroke on text; distinct from SVG `stroke`).
   // Re-stating its transparent default inside svg-as-image flips WebKit's text paint
   // path and silently drops text-shadow. Authored usage is nil — never capture it.
@@ -193,6 +189,7 @@ const MIN_WIDTH_PROPS = new Set(['min-width', 'min-inline-size'])
 // a 1/1000-rounded length). Deliberately tiny: it is paid once per box and the shrink-to-fit
 // parent holding a row of them is only paid once in total (#491).
 const WIDTH_EPSILON = 0.001
+export const INTRINSIC_WIDTHS = new Set(['min-content', 'max-content', 'fit-content'])
 
 /**
  * Whether getStyleKey softens the width for this tag/display (inline-sized text tags, the table
@@ -208,7 +205,7 @@ export function softensWidth(tagName, display) {
 
 // Displays whose `width: auto` is shrink-to-fit: dropping the width and re-adding it as a
 // min-width floor reproduces the used width exactly.
-const SHRINK_TO_FIT_DISPLAYS = new Set([
+export const SHRINK_TO_FIT_DISPLAYS = new Set([
   'inline-block', 'inline-flex', 'inline-grid', 'inline-table', 'inline-flow-root', 'table',
 ])
 
@@ -276,7 +273,8 @@ export function getStyleKey(snapshot, tagName, sizedByContent = true, isFlexItem
   // ellipsis. Flex/grid still bounds these items; authored widths stay frozen.
   const intrinsicEllipsisItem = isFlexItem && snapshot['text-overflow'] === 'ellipsis'
   const frozenNoWrap = softenTag && sizedByContent && !isInline && noWrapBox && !intrinsicEllipsisItem
-  const soften = softenTag && sizedByContent && !frozenNoWrap
+  const intrinsicWidth = snapshot.__intrinsicWidth || INTRINSIC_WIDTHS.has(snapshot.width)
+  const soften = softenTag && sizedByContent && !frozenNoWrap && !intrinsicWidth
 
   let keptMinWidth = false
   for (const prop in snapshot) {

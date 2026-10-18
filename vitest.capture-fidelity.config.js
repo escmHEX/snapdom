@@ -20,6 +20,7 @@ config.test.include = [
   'api.rasterize',
   'snapshot-transfer', 'snapFetch.effective-origin',
   'styles.intrinsic-ellipsis',
+  'styles.intrinsic-sizing',
   'export.shadow-probe-lifetime',
 ].map(name => `__tests__/${name}.test.js`)
 export default config

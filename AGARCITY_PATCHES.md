@@ -208,3 +208,20 @@ hint for consumers that transfer their export to a CPU encoder. It applies to
 the export canvas only; the default renderer and live source are unchanged.
 The browser decides its backing implementation. This is not a guarantee about
 GPU scheduling or frame rate. Cropped output has a native pixel regression.
+
+## Intrinsic text sizing and stylesheet zoom
+
+The style-copy pass retains cascade-resolved min-content, max-content and
+fit-content widths through CSS Typed OM. Auto widths on shrink-to-fit displays
+also remain content-sized. Freezing these as rounded used pixels can wrap labels
+or let a slightly wider rasterized name overlap its following separator. Physical
+and logical width declarations stay consistent, including vertical writing modes;
+authored fixed widths and max-width constraints keep their existing behavior.
+Browsers without Typed OM retain the existing used-width path rather than guessing
+the cascade from inline declarations. CSS zoom is paint-relevant and is retained
+when authored through stylesheets as well as inline styles.
+
+These reads occur in the cooperatively scheduled style-copy pass on the isolated
+snapshot. Acquisition, scheduler budgets, resource timeouts, cancellation and the
+live application render loop are unchanged. The Typed OM value is read once per
+style snapshot and reused by the existing width-preservation decision.

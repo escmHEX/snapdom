@@ -1,5 +1,6 @@
 import { snapshotTextTruncation } from './lineClamp.js'
 import { getStyleKey, softensWidth, softenNeedsAutoWidth, shouldIgnoreProp, getStyle } from '../utils/index.js'
+import { INTRINSIC_WIDTHS, SHRINK_TO_FIT_DISPLAYS } from '../utils/css.js'
 import { cache, EvictingMap, normalizeCachePolicy } from '../core/cache.js'
 
 const snapshotCache = new WeakMap()
@@ -248,13 +249,8 @@ function hasRenderedContent(el) {
  * @param {CSSStyleDeclaration} cs live computed style of `el`
  * @param {boolean} isFlexItem
  */
-function hasSpecifiedWidth(el, cs, isFlexItem) {
-  try {
-    if (typeof el.computedStyleMap === 'function') {
-      const v = el.computedStyleMap().get('width')
-      if (v != null) return !isContentWidthKeyword(String(v).trim().toLowerCase())
-    }
-  } catch { /* fall through to the layout probes */ }
+function hasSpecifiedWidth(el, cs, isFlexItem, computedWidth) {
+  if (computedWidth !== undefined) return !isContentWidthKeyword(computedWidth)
   const inlineWidth = el.style && (el.style.width || el.style.inlineSize)
   if (inlineWidth && !isContentWidthKeyword(String(inlineWidth).trim().toLowerCase())) return true
   // A box that hugs its content is sized by it — `width: max-content` / `fit-content` land here
@@ -354,6 +350,23 @@ function getSnapshot(el, preStyle = null, options = {}, session) {
   if (rec && (soft || !rec.soft) && rec.epoch === __epoch && rec.embedFonts === ef && rec.excludeStyleProps === ex) return rec.snapshot
   const style = preStyle || getComputedStyle(el)
   const snap = snapshotComputedStyleFull(style, options)
+  // Typed OM retains the cascade-resolved sizing keyword; getComputedStyle
+  // returns a rounded used width. Freezing max-content as pixels can rewrap
+  // text when SVGImage's fractional-zoom font metrics differ slightly.
+  let computedWidth
+  if (snap.width && typeof el.computedStyleMap === 'function') {
+    const value = el.computedStyleMap().get('width')
+    if (value != null) computedWidth = String(value).trim().toLowerCase()
+  }
+  Object.defineProperty(snap, '__computedWidth', { value: computedWidth })
+  const intrinsicWidth = INTRINSIC_WIDTHS.has(computedWidth) ||
+    (computedWidth === 'auto' && SHRINK_TO_FIT_DISPLAYS.has(snap.display))
+  Object.defineProperty(snap, '__intrinsicWidth', { value: intrinsicWidth })
+  if (intrinsicWidth) {
+    snap.width = computedWidth
+    const logicalWidth = (snap['writing-mode'] || 'horizontal-tb').startsWith('horizontal') ? 'inline-size' : 'block-size'
+    if (snap[logicalWidth]) snap[logicalWidth] = computedWidth
+  }
   stripHeightForWrappers(el, style, snap)
   const record = { epoch: __epoch, snapshot: snap, embedFonts: ef, excludeStyleProps: ex, soft }
   snapshots.set(el, record)
@@ -460,6 +473,14 @@ export async function inlineAllStyles(source, clone, sessionOrCtx, opts) {
   }
 
   const snap = getSnapshot(source, pre, ctx.options, session)
+  // Inline declarations outrank generated classes. Normalize their used width
+  // to the same resolved keyword, including logical inline/block-size aliases.
+  if (snap.__intrinsicWidth &&
+      (clone.style.width || clone.style.inlineSize || clone.style.blockSize)) {
+    clone.style.setProperty('width', snap.width)
+    const logicalWidth = (snap['writing-mode'] || 'horizontal-tb').startsWith('horizontal') ? 'inline-size' : 'block-size'
+    if (clone.style.getPropertyValue(logicalWidth)) clone.style.setProperty(logicalWidth, snap.width)
+  }
 
   const flexItem = isFlexOrGridItem(source)
 
@@ -487,7 +508,7 @@ export async function inlineAllStyles(source, clone, sessionOrCtx, opts) {
     // and a flex/grid item gets no floor at all (#406) — both lost the authored width. Treat an
     // author-specified width as "not sized by content" so it is kept verbatim.
     if (sizedByContent && softenNeedsAutoWidth(tag, snap, flexItem) &&
-        hasSpecifiedWidth(source, pre, flexItem)) {
+        hasSpecifiedWidth(source, pre, flexItem, snap.__computedWidth)) {
       sizedByContent = false
     }
     // Fold tag/content/flex into the cache key so soften-eligible elements with identical styles
