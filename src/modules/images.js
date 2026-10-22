@@ -48,10 +48,15 @@ function extractImageDimensions(img) {
 export async function inlineImages(clone, options = {}) {
   // querySelectorAll only matches descendants: when the capture root is itself an
   // <img>, it must be included or its src stays external and svg-as-image won't load it.
-  const imgs = Array.from(clone.querySelectorAll('img'))
-  if (clone.tagName === 'IMG') imgs.unshift(clone)
-  /** @param {HTMLImageElement} img */
+  const imageSelector = 'img,input[type="image"]'
+  const imgs = Array.from(clone.querySelectorAll(imageSelector))
+  if (clone.matches(imageSelector)) imgs.unshift(clone)
+  /** @param {HTMLImageElement | HTMLInputElement} img */
   const processImg = async (img) => {
+    // Image buttons are also external image resources in SVG foreignObject.
+    // Unlike IMG, their zero width/height attributes do not describe intrinsic
+    // dimensions; leave their sizing to the captured CSS and image resource.
+    const imageButton = img.localName === 'input'
     const session = options.__session
     const source = session?.nodeMap.get(img)
     if (source?.localName === 'img' && session.styleCache.get(source)?.visibility === 'hidden' &&
@@ -86,8 +91,8 @@ export async function inlineImages(clone, options = {}) {
     const cached = persistent && cache.image?.get(src)
     if (cached) {
       img.src = cached
-      if (!img.width) img.width = img.naturalWidth || 100
-      if (!img.height) img.height = img.naturalHeight || 100
+      if (!imageButton && !img.width) img.width = img.naturalWidth || 100
+      if (!imageButton && !img.height) img.height = img.naturalHeight || 100
       return
     }
 
@@ -96,8 +101,8 @@ export async function inlineImages(clone, options = {}) {
       // Success path: inline DataURL and ensure dimensions for layout fidelity
       if (persistent) cache.image?.set(src, r.data)
       img.src = r.data
-      if (!img.width) img.width = img.naturalWidth || 100
-      if (!img.height) img.height = img.naturalHeight || 100
+      if (!imageButton && !img.width) img.width = img.naturalWidth || 100
+      if (!imageButton && !img.height) img.height = img.naturalHeight || 100
       return
     }
     // Try fallbackURL (string or callback)
@@ -114,8 +119,8 @@ export async function inlineImages(clone, options = {}) {
           const fallbackData = await snapFetch(fallbackUrl, { as: 'dataURL', useProxy: options.useProxy })
           if (fallbackData?.ok && typeof fallbackData.data === 'string') {
             img.src = fallbackData.data
-            if (!img.width) img.width = fbW
-            if (!img.height) img.height = fbH
+            if (!imageButton && !img.width) img.width = fbW
+            if (!imageButton && !img.height) img.height = fbH
             return
           }
         }

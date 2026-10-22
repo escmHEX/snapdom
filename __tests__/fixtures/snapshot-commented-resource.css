@@ -1,0 +1,6 @@
+/* A stylesheet's comment may contain unmatched quotes or url(not-a-resource). */
+.snapshot-commented-resource {
+  width: 24px;
+  height: 24px;
+  background-image: url(./snapshot-custom-properties-icon.png);
+}

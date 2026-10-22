@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { prepareClone } from '../src/core/prepare.js'
+import { generateDedupedBaseCSS } from '../src/utils/css.js'
 
 const mounted = []
 function mount(node) { document.body.append(node); mounted.push(node); return node }
@@ -12,12 +13,60 @@ async function copy(root) {
   const host = mount(document.createElement('div'))
   const shadow = host.attachShadow({ mode: 'open' })
   const style = document.createElement('style')
-  style.textContent = result.classCSS
+  style.textContent = generateDedupedBaseCSS(new Set([root, ...root.querySelectorAll('*')].map(node => node.localName))) + result.classCSS
   shadow.append(style, result.clone)
   return result.clone
 }
 
 describe('intrinsic width in frozen CSS', () => {
+  it.skipIf(typeof Element.prototype.computedStyleMap !== 'function')('does not restore an excluded unitless line height', async () => {
+    const sheet = mount(document.createElement('style'))
+    sheet.textContent = '.excluded-line-height { line-height: 1.75 }'
+    const root = mount(document.createElement('div'))
+    root.className = 'excluded-line-height'
+    root.textContent = 'Excluded property'
+    const result = await prepareClone(root, {
+      excludeStyleProps: prop => prop === 'line-height',
+      __session: { styleMap: new Map(), styleCache: new WeakMap(), nodeMap: new Map() },
+    })
+    const emitted = new CSSStyleSheet()
+    emitted.replaceSync(result.classCSS)
+    expect([...emitted.cssRules].some(rule => rule.style?.lineHeight)).toBe(false)
+  })
+
+  it.skipIf(typeof Element.prototype.computedStyleMap !== 'function')('preserves unitless line height through fractional CSS zoom', async () => {
+    const root = mount(document.createElement('div'))
+    root.style.cssText = 'width:300px;zoom:.9;font:14px/1.428571 Arial'
+    root.innerHTML = '<p style="font-size:15px;margin:0">First line<br>Second line<br>Third line</p><p>Following message</p>'
+    const clone = await copy(root)
+    // Model an effective font-size change in SVG rasterization: a unitless
+    // line height must still scale with the font instead of keeping old pixels.
+    for (const tree of [root, clone]) tree.firstElementChild.style.fontSize = '15.5px'
+    for (let i = 0; i < root.children.length; i++) {
+      expect(clone.children[i].getBoundingClientRect().height)
+        .toBeCloseTo(root.children[i].getBoundingClientRect().height, 1)
+    }
+  })
+
+  it.skipIf(typeof Element.prototype.computedStyleMap !== 'function')('keeps automatic block heights responsive to raster text wrapping', async () => {
+    const root = mount(document.createElement('div'))
+    root.style.cssText = 'width:max-content;font:17px/1.25 Arial'
+    root.innerHTML = '<section style="padding:10px;border:2px solid red"><p style="margin:0;text-align:justify">A message near its wrap boundary</p></section><p>Following message</p>'
+    root.style.width = `${root.getBoundingClientRect().width}px`
+    const clone = await copy(root)
+    const before = root.firstElementChild.getBoundingClientRect().height
+    for (const tree of [root, clone]) {
+      tree.querySelector('section p').style.letterSpacing = '0.1px'
+    }
+    expect(root.firstElementChild.getBoundingClientRect().height).toBeGreaterThan(before)
+    for (let i = 0; i < root.children.length; i++) {
+      expect(clone.children[i].getBoundingClientRect().height)
+        .toBeCloseTo(root.children[i].getBoundingClientRect().height, 1)
+      expect(clone.children[i].getBoundingClientRect().top - clone.getBoundingClientRect().top)
+        .toBeCloseTo(root.children[i].getBoundingClientRect().top - root.getBoundingClientRect().top, 1)
+    }
+  })
+
   it.skipIf(typeof Element.prototype.computedStyleMap !== 'function')('lets an auto flex row grow with its intrinsic labels after raster metric drift', async () => {
     const root = mount(document.createElement('div'))
     root.style.cssText = 'width:600px;display:flex;flex-direction:column;align-items:flex-start;font:17px Arial'

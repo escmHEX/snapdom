@@ -16,6 +16,32 @@ async function materialize(state) {
 }
 
 describe('structural snapshot state', () => {
+  it('keeps relative resources when an immutable stylesheet requires the CORS text path', async () => {
+    const link = mount('link'); link.rel = 'stylesheet'
+    const loaded = new Promise((resolve, reject) => { link.onload = resolve; link.onerror = reject })
+    link.href = new URL('./fixtures/snapshot-commented-resource.css?direct', import.meta.url).href
+    await loaded
+    const root = mount('div'); root.className = 'snapshot-commented-resource'
+    const original = getComputedStyle(root).backgroundImage
+    const state = snapshot(root, { immutableStyleSheets: [link.href] }); cleanup.push(() => state.dispose())
+    const frame = mount('iframe'), doc = frame.contentDocument
+    doc.open(); doc.write('<!doctype html><html><head></head><body></body></html>'); doc.close()
+    const prototype = frame.contentWindow.CSSStyleSheet.prototype
+    const readRules = Object.getOwnPropertyDescriptor(prototype, 'cssRules').get
+    const rules = vi.spyOn(prototype, 'cssRules', 'get').mockImplementation(function () {
+      if (this.href === link.href && this.ownerNode.ownerDocument !== document) {
+        throw new DOMException('Opaque stylesheet', 'SecurityError')
+      }
+      return readRules.call(this)
+    })
+    try {
+      const result = await materializeSnapshot(state, { document: doc, schedulerMode: 'background' })
+      cleanup.push(() => result.dispose())
+      expect(rules).toHaveBeenCalled()
+      expect(result.element.ownerDocument.defaultView.getComputedStyle(result.element).backgroundImage).toBe(original)
+    } finally { rules.mockRestore() }
+  })
+
   it('reads each animated property once per target and pseudo across effects and keyframes', () => {
     const root = mount('div')
     const nativeComputed = window.getComputedStyle.bind(window)

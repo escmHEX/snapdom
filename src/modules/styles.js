@@ -359,6 +359,11 @@ function getSnapshot(el, preStyle = null, options = {}, session, flexItem = fals
   // text when SVGImage's fractional-zoom font metrics differ slightly.
   let computedWidth
   const typed = typeof el.computedStyleMap === 'function' ? el.computedStyleMap() : null
+  // A unitless line height scales with the effective raster font size. Its
+  // resolved pixel value drifts at fractional zoom, accumulating across lines.
+  const relativeLineHeight = snap['line-height'] ? typed?.get('line-height') : null
+  if (relativeLineHeight?.unit === 'number') snap['line-height'] = String(relativeLineHeight)
+  Object.defineProperty(snap, '__relativeLineHeight', { value: relativeLineHeight?.unit === 'number' })
   if (snap.width && typed) {
     const value = typed.get('width')
     if (value != null) computedWidth = String(value).trim().toLowerCase()
@@ -406,7 +411,16 @@ function getSnapshot(el, preStyle = null, options = {}, session, flexItem = fals
   }
   if (autoInsets) for (const prop of LOGICAL_INSETS) delete snap[prop]
   Object.defineProperty(snap, '__autoInsets', { value: autoInsets })
-  stripHeightForWrappers(el, style, snap)
+  // Keep in-flow content-driven height as a layout input. SVG text metrics can move a
+  // word to the next line; a frozen used height then clips or overlaps siblings.
+  const autoHeight = !!(!outOfFlow && typed && snap.height && typed.get('height')?.value === 'auto' &&
+    !REPLACED_TAGS.has(el.localName))
+  Object.defineProperty(snap, '__autoHeight', { value: autoHeight })
+  if (autoHeight) {
+    snap.height = 'auto'
+    const logicalHeight = (snap['writing-mode'] || 'horizontal-tb').startsWith('horizontal') ? 'block-size' : 'inline-size'
+    if (snap[logicalHeight]) snap[logicalHeight] = 'auto'
+  } else stripHeightForWrappers(el, style, snap)
   const record = { epoch: __epoch, snapshot: snap, embedFonts: ef, excludeStyleProps: ex, soft }
   snapshots.set(el, record)
   // Background processing consumes the last snapshot; it never reuses style values.
@@ -513,6 +527,7 @@ export async function inlineAllStyles(source, clone, sessionOrCtx, opts) {
 
   const flexItem = isFlexOrGridItem(source)
   const snap = getSnapshot(source, pre, ctx.options, session, flexItem)
+  if (snap.__relativeLineHeight && (clone.style.lineHeight || clone.style.font)) clone.style.lineHeight = snap['line-height']
   // Inline declarations outrank generated classes. Normalize their used width
   // to the same resolved keyword, including logical inline/block-size aliases.
   if (snap.__intrinsicWidth &&
@@ -520,6 +535,12 @@ export async function inlineAllStyles(source, clone, sessionOrCtx, opts) {
     clone.style.setProperty('width', snap.width)
     const logicalWidth = (snap['writing-mode'] || 'horizontal-tb').startsWith('horizontal') ? 'inline-size' : 'block-size'
     if (clone.style.getPropertyValue(logicalWidth)) clone.style.setProperty(logicalWidth, snap.width)
+  }
+
+  if (snap.__autoHeight) {
+    if (clone.style.height) clone.style.height = 'auto'
+    const logicalHeight = (snap['writing-mode'] || 'horizontal-tb').startsWith('horizontal') ? 'block-size' : 'inline-size'
+    if (clone.style.getPropertyValue(logicalHeight)) clone.style.setProperty(logicalHeight, 'auto')
   }
 
   if (snap.__autoMargins && source.getAttribute?.('style')) {

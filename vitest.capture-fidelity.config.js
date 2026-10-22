@@ -12,6 +12,7 @@ config.test.include = [
   'core.capture.more', 'default-sandbox-lifetime', 'export.canvas-lifetime',
   'exporter.toCanvas.density', 'fonts.data-stylesheet', 'fonts.cooperative', 'fonts.soft-cache', 'fonts.pruned-usage',
   'icon-font-context', 'icons.isolated-context', 'image-cache-lifetime', 'images.hidden-intrinsic',
+  'images.input-control',
   'module.lineClamp', 'node-global-collision', 'regression.scrollLayout',
   'scheduler-lifetime', 'scheduler-background', 'snapshot-state', 'styles.signature-lifetime',
   'export.paint-lifetime',

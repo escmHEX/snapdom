@@ -5,6 +5,20 @@ This fork is based on upstream SnapDOM 2.24.15, commit
 remain unchanged. All corrections are generic HTML/CSS behavior; the downstream
 application supplies its own surface, canvas snapshots and upload contracts.
 
+## HUD text flow and image resources
+
+Capture preserves Typed OM unitless line heights and in-flow automatic heights.
+Resolving them to used pixels can change line spacing under fractional zoom or
+leave rewrapped text outside its box. Positioned and replaced boxes retain their
+measured heights. These values reuse the existing per-capture computed-style map
+and do not restore properties removed by `excludeStyleProps`.
+
+Image inputs use the existing image resource inlining path without inserting
+fallback dimensions, including when `fallbackURL` supplies the resource.
+Immutable stylesheet URL rebasing treats CSS comments as
+opaque, including unmatched quotes, so fetched stylesheet resources retain their
+original base URL inside the isolated renderer.
+
 ## Adopted document stylesheets
 
 Structural snapshots freeze constructed document stylesheets in adoption order,

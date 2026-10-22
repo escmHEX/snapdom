@@ -12,13 +12,18 @@ function cssUnescape(value) {
   })
 }
 
-// CSSOM has already parsed the stylesheet. Only URL tokens are rebased here;
-// quoted strings and escapes must remain opaque (notably content: "url(...)").
+// Frozen CSSOM and fetched immutable CSS share URL rebasing. Comments, quoted
+// strings and escapes stay opaque (notably apostrophes and content: "url(...)").
 function absoluteUrls(text, base) {
   let result = '', index = 0
   while (index < text.length) {
     const character = text[index]
-    if (character === '"' || character === "'") {
+    if (character === '/' && text[index + 1] === '*') {
+      const end = text.indexOf('*/', index + 2)
+      const next = end < 0 ? text.length : end + 2
+      result += text.slice(index, next)
+      index = next
+    } else if (character === '"' || character === "'") {
       const start = index++, quote = character
       while (index < text.length) {
         if (text[index] === '\\') { index += 2; continue }

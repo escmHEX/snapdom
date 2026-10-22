@@ -22,7 +22,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { snapdom } from '../src/index'
 import { prepareClone } from '../src/core/prepare.js'
-import { getStyleKey } from '../src/utils/css.js'
+import { getStyleKey, generateDedupedBaseCSS } from '../src/utils/css.js'
 
 const STYLES = `
   .i491 * { box-sizing: border-box }
@@ -63,7 +63,7 @@ async function mountClone(root) {
   document.body.appendChild(host)
   const shadow = host.attachShadow({ mode: 'open' })
   const styleEl = document.createElement('style')
-  styleEl.textContent = classCSS || ''
+  styleEl.textContent = generateDedupedBaseCSS(new Set([root, ...root.querySelectorAll('*')].map(node => node.localName))) + (classCSS || '')
   shadow.append(styleEl, clone)
   return shadow
 }
