@@ -19,6 +19,57 @@ async function copy(root) {
 }
 
 describe('intrinsic width in frozen CSS', () => {
+  for (const zoom of [1, .9, 1.25]) {
+    for (const inline of [false, true]) {
+      it(`preserves fractional border thickness at zoom ${zoom}, inline ${inline}`, async () => {
+        const sheet = mount(document.createElement('style'))
+        sheet.textContent = '.fractional-border { width:27px;height:27px;box-sizing:border-box;border-radius:50%;border:3px solid green }'
+        const root = mount(document.createElement('div'))
+        root.style.cssText = `width:300px;height:100px;zoom:${zoom}`
+        root.innerHTML = `<div class="fractional-border"${inline ? ' style="border:3px solid green"' : ''}></div>`
+        const clone = await copy(root)
+        for (const side of ['top', 'right', 'bottom', 'left']) {
+          expect(getComputedStyle(clone.firstElementChild).getPropertyValue(`border-${side}-width`))
+            .toBe(getComputedStyle(root.firstElementChild).getPropertyValue(`border-${side}-width`))
+        }
+        expect(clone.firstElementChild.getBoundingClientRect().width)
+          .toBeCloseTo(root.firstElementChild.getBoundingClientRect().width, 1)
+      })
+    }
+  }
+
+  for (const zoom of [1, .9]) {
+    for (const offset of [-4, 30]) {
+      it(`preserves percentage contributions to intrinsic width at zoom ${zoom} with offset ${offset}`, async () => {
+        const root = mount(document.createElement('div'))
+        root.style.cssText = `width:800px;display:flex;align-items:flex-end;zoom:${zoom}`
+        root.innerHTML = `<div style="display:flex;flex-direction:column;width:max-content;min-width:300px;flex:0 0 auto"><div style="width:300px;height:30px"></div><div style="width:calc(100% + ${offset}px);min-width:295px;height:30px"></div></div><div style="width:27px;height:27px;flex:none;border:3px solid green;border-radius:50%;box-sizing:border-box"></div>`
+        const clone = await copy(root)
+        // A percentage contributes differently to intrinsic sizing than its used
+        // pixel width. The following control must stay at the click-time position.
+        expect(clone.firstElementChild.getBoundingClientRect().width)
+          .toBeCloseTo(root.firstElementChild.getBoundingClientRect().width, 1)
+        expect(clone.lastElementChild.getBoundingClientRect().left - clone.getBoundingClientRect().left)
+          .toBeCloseTo(root.lastElementChild.getBoundingClientRect().left - root.getBoundingClientRect().left, 1)
+        expect(clone.firstElementChild.lastElementChild.getBoundingClientRect().width)
+          .toBeCloseTo(root.firstElementChild.lastElementChild.getBoundingClientRect().width, 1)
+      })
+    }
+  }
+
+  it('keeps nested percentage input sizing out of intrinsic contributions', async () => {
+    const root = mount(document.createElement('div'))
+    root.style.cssText = 'width:800px;display:flex;zoom:.9'
+    root.innerHTML = '<div style="display:flex;flex-direction:column;width:max-content;min-width:300px;flex:none"><div style="width:300px;height:30px"></div><div style="display:flex;width:calc(100% + 30px);min-width:295px;height:30px;gap:4px"><input style="width:100%;flex:1 1 0;min-width:0;box-sizing:border-box"><button style="width:30px;flex:0 0 30px">A</button><button style="width:30px;flex:0 0 30px">B</button><button style="width:30px;flex:0 0 30px">C</button></div></div><div style="width:27px;flex:none"></div>'
+    const clone = await copy(root)
+    expect(clone.firstElementChild.getBoundingClientRect().width)
+      .toBeCloseTo(root.firstElementChild.getBoundingClientRect().width, 1)
+    expect(clone.lastElementChild.getBoundingClientRect().left - clone.getBoundingClientRect().left)
+      .toBeCloseTo(root.lastElementChild.getBoundingClientRect().left - root.getBoundingClientRect().left, 1)
+    expect(clone.querySelector('input').getBoundingClientRect().width)
+      .toBeCloseTo(root.querySelector('input').getBoundingClientRect().width, 1)
+  })
+
   it.skipIf(typeof Element.prototype.computedStyleMap !== 'function')('does not restore an excluded unitless line height', async () => {
     const sheet = mount(document.createElement('style'))
     sheet.textContent = '.excluded-line-height { line-height: 1.75 }'

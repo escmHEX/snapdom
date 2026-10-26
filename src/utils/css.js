@@ -189,6 +189,14 @@ const MIN_WIDTH_PROPS = new Set(['min-width', 'min-inline-size'])
 // a 1/1000-rounded length). Deliberately tiny: it is paid once per box and the shrink-to-fit
 // parent holding a row of them is only paid once in total (#491).
 const WIDTH_EPSILON = 0.001
+export const BORDER_WIDTH_PROPS = new Set([
+  'border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width',
+  'border-block-start-width', 'border-block-end-width', 'border-inline-start-width', 'border-inline-end-width',
+])
+export function preservePixelLengthPrecision(value) {
+  if (!value.endsWith('px') || !value.includes('.')) return value
+  return `${(parseFloat(value) + WIDTH_EPSILON).toFixed(3)}px`
+}
 export const INTRINSIC_WIDTHS = new Set(['min-content', 'max-content', 'fit-content'])
 
 /**
@@ -293,6 +301,13 @@ export function getStyleKey(snapshot, tagName, sizedByContent = true, isFlexItem
       }
     }
     if (value && value !== defaults[prop]) {
+      // Computed border widths are already pixel-snapped at the source zoom.
+      // Their rounded CSSOM string can fall below that pixel on the second
+      // rasterization. Apply the same serialization slack as frozen box widths.
+      if (BORDER_WIDTH_PROPS.has(prop)) {
+        entries.push(`${prop}:${preservePixelLengthPrecision(value)}`)
+        continue
+      }
       // Blink lays out in 1/64px units but serializes computed lengths rounded to 1/1000 —
       // sometimes DOWN. Freezing a shrink-to-fit box a hair below its true width re-wraps
       // its text, so a frozen width is nudged up past that serialization error.
@@ -311,7 +326,7 @@ export function getStyleKey(snapshot, tagName, sizedByContent = true, isFlexItem
           // Re-serialized at the same 1/1000 the value came in at: rounding can shave back at
           // most half of the epsilon, so the result still clears `n`, and the shared precision
           // keeps sibling boxes on one generated class instead of one each.
-          entries.push(`${prop}:${(n + WIDTH_EPSILON).toFixed(3)}px`)
+          entries.push(`${prop}:${preservePixelLengthPrecision(value)}`)
           continue
         }
       }

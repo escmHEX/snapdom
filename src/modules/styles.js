@@ -1,6 +1,6 @@
 import { snapshotTextTruncation } from './lineClamp.js'
 import { getStyleKey, softensWidth, softenNeedsAutoWidth, shouldIgnoreProp, getStyle } from '../utils/index.js'
-import { INTRINSIC_WIDTHS, SHRINK_TO_FIT_DISPLAYS, REPLACED_TAGS } from '../utils/css.js'
+import { INTRINSIC_WIDTHS, SHRINK_TO_FIT_DISPLAYS, REPLACED_TAGS, BORDER_WIDTH_PROPS, preservePixelLengthPrecision } from '../utils/css.js'
 import { cache, EvictingMap, normalizeCachePolicy } from '../core/cache.js'
 
 const snapshotCache = new WeakMap()
@@ -376,7 +376,15 @@ function getSnapshot(el, preStyle = null, options = {}, session, flexItem = fals
     (computedWidth === 'auto' && (SHRINK_TO_FIT_DISPLAYS.has(snap.display) ||
       (((flexItem && !outOfFlow) || autoOutOfFlowWidth) && !REPLACED_TAGS.has(el.localName))))
   Object.defineProperty(snap, '__intrinsicWidth', { value: intrinsicWidth })
-  if (intrinsicWidth) {
+  // A percentage child is cyclic during its parent's intrinsic sizing. Replacing
+  // it with used pixels changes that contribution and can enlarge max-content
+  // parents. Preserve the percentage chain, including percentage-sized inputs
+  // inside a percentage-sized flex row. Parents are snapshotted before children.
+  const percentageWidth = !!(computedWidth?.includes('%') && el.parentElement &&
+    (snapshots.get(el.parentElement)?.snapshot.__percentageWidth ||
+      INTRINSIC_WIDTHS.has(String(el.parentElement.computedStyleMap().get('width')))))
+  Object.defineProperty(snap, '__percentageWidth', { value: percentageWidth })
+  if (intrinsicWidth || percentageWidth) {
     snap.width = computedWidth
     const logicalWidth = (snap['writing-mode'] || 'horizontal-tb').startsWith('horizontal') ? 'inline-size' : 'block-size'
     if (snap[logicalWidth]) snap[logicalWidth] = computedWidth
@@ -474,7 +482,7 @@ function normalizeInlineStyleToComputed(source, clone, computed) {
   for (let i = 0; i < source.style.length; i++) {
     const prop = source.style[i]
     const val = computed.getPropertyValue(prop)
-    if (val) clone.style.setProperty(prop, val)
+    if (val) clone.style.setProperty(prop, BORDER_WIDTH_PROPS.has(prop) ? preservePixelLengthPrecision(val) : val)
   }
 }
 
@@ -530,7 +538,7 @@ export async function inlineAllStyles(source, clone, sessionOrCtx, opts) {
   if (snap.__relativeLineHeight && (clone.style.lineHeight || clone.style.font)) clone.style.lineHeight = snap['line-height']
   // Inline declarations outrank generated classes. Normalize their used width
   // to the same resolved keyword, including logical inline/block-size aliases.
-  if (snap.__intrinsicWidth &&
+  if ((snap.__intrinsicWidth || snap.__percentageWidth) &&
       (clone.style.width || clone.style.inlineSize || clone.style.blockSize)) {
     clone.style.setProperty('width', snap.width)
     const logicalWidth = (snap['writing-mode'] || 'horizontal-tb').startsWith('horizontal') ? 'inline-size' : 'block-size'

@@ -7,6 +7,17 @@ application supplies its own surface, canvas snapshots and upload contracts.
 
 ## HUD text flow and image resources
 
+Percentage widths, including nested percentage inputs, retain their resolved CSS
+expression beneath an explicitly intrinsic-width parent. Freezing those widths
+as used pixels changes their cyclic contribution to `max-content` sizing and
+moves following controls. This uses the capture's existing Typed OM snapshots;
+browsers without Typed OM keep the measured-width fallback.
+
+Fractional border widths reuse the frozen-width serialization slack before a
+second pixel snap at CSS zoom. Physical and logical widths, including normalized
+inline declarations, keep the same painted thickness instead of losing a pixel
+to CSSOM decimal truncation.
+
 Capture preserves Typed OM unitless line heights and in-flow automatic heights.
 Resolving them to used pixels can change line spacing under fractional zoom or
 leave rewrapped text outside its box. Positioned and replaced boxes retain their
