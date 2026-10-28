@@ -1,6 +1,12 @@
 import { getStyle } from '../utils/index.js'
 import { viewportFrozenClones } from '../utils/capture.helpers.js'
 import { getAutomaticThumbMinimum } from './scrollbarMetrics.js'
+import { isFirefox, isSafari } from '../utils/browser.js'
+import { nativeScrollbarFallback } from './scrollbarFallback.js'
+
+// Gecko intentionally omits native scrollbars in SVG image documents. iOS
+// Firefox uses WebKit and must retain the existing WebKit capture path.
+const needsNativeScrollbarFallback = isFirefox() && !isSafari()
 
 const HTML_NS = 'http://www.w3.org/1999/xhtml'
 const layoutProperties = [
@@ -16,20 +22,21 @@ const scrollbarPaintProperties = ['background-color', 'border-radius', 'border',
 
 // SVG images cannot retain DOM scroll offsets. Once the content is translated,
 // buttonless authored scrollbar parts must be painted separately in its gutter.
-// Native/overlay scrollbars keep the existing behavior: their OS geometry is not
-// exposed by CSS, so do not invent a platform theme or minimum thumb length.
-async function preserveAuthoredScrollbars(clone, source, cs, inner, capture, options) {
+// Gecko uses an explicit approximation of standard scrollbar colors/geometry;
+// other engines retain their existing authored-part path.
+async function preserveScrollbars(clone, source, cs, inner, capture, options) {
   const gutterX = Math.round(source.offsetWidth - source.clientWidth - parseFloat(cs.borderLeftWidth) - parseFloat(cs.borderRightWidth))
   const gutterY = Math.round(source.offsetHeight - source.clientHeight - parseFloat(cs.borderTopWidth) - parseFloat(cs.borderBottomWidth))
-  if ((!gutterX && !gutterY) || cs.scrollbarWidth !== 'auto') return
-  const buttonStyle = getStyle(source, '::-webkit-scrollbar-button')
-  if (buttonStyle.display !== 'none') return
-  const thumbStyle = getStyle(source, '::-webkit-scrollbar-thumb')
-  const trackStyle = getStyle(source, '::-webkit-scrollbar-track')
-  const automaticMinimum = await getAutomaticThumbMinimum(capture, options)
+  const fallback = needsNativeScrollbarFallback ? nativeScrollbarFallback(source, cs, gutterX, gutterY) : null
+  if (needsNativeScrollbarFallback ? !fallback : ((!gutterX && !gutterY) || cs.scrollbarWidth !== 'auto')) return
+  if (!fallback && getStyle(source, '::-webkit-scrollbar-button').display !== 'none') return
+  const thumbStyle = fallback?.thumb || getStyle(source, '::-webkit-scrollbar-thumb')
+  const trackStyle = fallback?.track || getStyle(source, '::-webkit-scrollbar-track')
+  const automaticMinimum = fallback?.minimum || await getAutomaticThumbMinimum(capture, options)
   const makePart = style => {
     const part = clone.ownerDocument.createElement('div')
     part.style.cssText = 'all:initial;display:block;box-sizing:border-box;pointer-events:none;'
+    if (fallback) part.style.colorScheme = cs.colorScheme
     for (const property of scrollbarPaintProperties) part.style.setProperty(property, style.getPropertyValue(property))
     return part
   }
@@ -63,6 +70,12 @@ async function preserveAuthoredScrollbars(clone, source, cs, inner, capture, opt
     const track = makePart(trackStyle)
     track.style.gridArea = horizontal ? '2 / 1' : '1 / 2'
     track.style.position = 'relative'
+    if (fallback && !(horizontal ? gutterY : gutterX)) {
+      // Overlay bars occupy the existing viewport, never shrink its content.
+      track.style.gridArea = '1 / 1'
+      track.style[horizontal ? 'height' : 'width'] = `${thickness}px`
+      track.style[horizontal ? 'alignSelf' : 'justifySelf'] = 'end'
+    }
     const thumb = makePart(thumbStyle)
     thumb.style.position = 'absolute'
     thumb.style.width = `${horizontal ? length : thickness}px`
@@ -71,16 +84,17 @@ async function preserveAuthoredScrollbars(clone, source, cs, inner, capture, opt
     thumb.style.top = `${horizontal ? 0 : start}px`
     track.append(thumb); clone.append(track)
   }
-  appendAxis(false, gutterX)
-  appendAxis(true, gutterY)
+  appendAxis(false, fallback ? fallback.vertical : gutterX)
+  appendAxis(true, fallback ? fallback.horizontal : gutterY)
   if (gutterX && gutterY) {
-    // A zero-client-area native scroller paints only its corner. This retains
-    // the browser theme (including its default fill) instead of guessing a color.
-    const corner = clone.ownerDocument.createElement('div')
-    corner.className = source.className
-    corner.style.cssText = `all:initial;display:block;overflow:scroll;width:${gutterX}px;height:${gutterY}px;color-scheme:${cs.colorScheme};`
-    for (const property of cs) {
-      if (property.startsWith('--')) corner.style.setProperty(property, cs.getPropertyValue(property))
+    const corner = fallback ? makePart(trackStyle) : clone.ownerDocument.createElement('div')
+    if (!fallback) {
+      // A zero-client-area native scroller paints only its browser-themed corner.
+      corner.className = source.className
+      corner.style.cssText = `all:initial;display:block;overflow:scroll;width:${gutterX}px;height:${gutterY}px;color-scheme:${cs.colorScheme};`
+      for (const property of cs) {
+        if (property.startsWith('--')) corner.style.setProperty(property, cs.getPropertyValue(property))
+      }
     }
     corner.style.gridArea = '2 / 2'
     clone.append(corner)
@@ -101,6 +115,9 @@ export function preserveScrollLayout(clone, source, styleCache, nodeMap, options
     const vertical = cs.overflowY === 'scroll' ||
       (cs.overflowY === 'auto' && source.scrollHeight > source.clientHeight)
     if (!horizontal && !vertical) return
+    if (needsNativeScrollbarFallback && cs.scrollbarWidth !== 'none') {
+      return translateScrollLayout(clone, source, cs, styleCache, nodeMap, options)
+    }
     // Pseudo-element rules retain var() expressions; the normal style snapshot
     // removes custom properties after resolving ordinary declarations.
     for (const property of cs) {
@@ -133,6 +150,12 @@ export function preserveScrollLayout(clone, source, styleCache, nodeMap, options
     return
   }
 
+  return translateScrollLayout(clone, source, cs, styleCache, nodeMap, options)
+}
+
+function translateScrollLayout(clone, source, cs, styleCache, nodeMap, options) {
+  const scrollX = source.scrollLeft
+  const scrollY = source.scrollTop
   const inner = clone.ownerDocument.createElement('div')
   inner.style.all = 'unset'
   for (const property of layoutProperties) {
@@ -152,12 +175,16 @@ export function preserveScrollLayout(clone, source, styleCache, nodeMap, options
   clone.style.overflow = 'hidden'
   clone.style.scrollbarWidth = 'none'
   clone.style.scrollbarGutter = 'auto'
+  // Gecko's computed content width includes its native gutter; Chromium's
+  // excludes it. Preserve the border box without adding Gecko's gutter twice.
+  const extraWidth = needsNativeScrollbarFallback ? parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth) : source.offsetWidth - source.clientWidth
+  const extraHeight = needsNativeScrollbarFallback ? parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth) : source.offsetHeight - source.clientHeight
   // Keep the source border box while moving padding into its scrolling viewport.
   clone.style.boxSizing = 'border-box'
   clone.style.width = cs.boxSizing === 'border-box' ? cs.width :
-    `${parseFloat(cs.width) + parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + source.offsetWidth - source.clientWidth}px`
+    `${parseFloat(cs.width) + parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + extraWidth}px`
   clone.style.height = cs.boxSizing === 'border-box' ? cs.height :
-    `${parseFloat(cs.height) + parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom) + source.offsetHeight - source.clientHeight}px`
+    `${parseFloat(cs.height) + parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom) + extraHeight}px`
   const outside = []
   for (const child of clone.querySelectorAll('*')) {
     const original = nodeMap?.get(child)
@@ -172,5 +199,5 @@ export function preserveScrollLayout(clone, source, styleCache, nodeMap, options
   while (clone.firstChild) inner.appendChild(clone.firstChild)
   clone.appendChild(inner)
   for (const child of outside) clone.appendChild(child)
-  return preserveAuthoredScrollbars(clone, source, cs, inner, styleCache, options)
+  return preserveScrollbars(clone, source, cs, inner, styleCache, options)
 }

@@ -291,7 +291,7 @@ use a separate platform minimum. This follows the browser's custom-part sizing m
 https://chromium.googlesource.com/chromium/src/+/refs/heads/main/third_party/blink/renderer/core/layout/layout_custom_scrollbar_part.cc
 
 This targets the client's solid, buttonless custom parts. Native OS/overlay
-scrollbars retain their previous behavior; this is not a general OS-theme
+scrollbars outside Gecko retain their previous behavior; this is not a general OS-theme
 reimplementation or certification of arbitrary scrollbar buttons, images,
 track-piece margins or platform animations. These reads and nodes belong only to
 capture processing, never acquisition, application listeners or a render loop.
@@ -310,3 +310,44 @@ A 20-pair alternating Windows/IAB trial at DPR 1.5 measured median DOM export
 119.8 ms before and 122.6 ms after (P95 141.3/157.6 ms). This bounds this fixture's
 capture work, not gameplay FPS or performance on other hardware. The live source
 was unchanged and no renderer frames remained after the trial.
+
+
+## Gecko native scrollbar fallback
+
+Firefox's ScrollContainerFrame deliberately creates no scrollbars for SVG image
+objects (GetNeededAnonymousContent / IsBeingUsedAsImage). Reconstruct its visible
+scrollable axes only in capture preparation, reusing the authored-bar viewport
+and grid. Firefox on iOS retains the WebKit path. Chromium and WebKit do not use
+this fallback. No application listeners, acquisition work or gameplay-loop checks
+are added.
+
+The source's computed scrollbar-color, scrollbar-width, gutters, viewport,
+scroll extent and signed offset drive the result. Zero-offset scrollers need the
+same treatment as scrolled ones. Gecko's computed content width already contains
+its gutter, so it must not be added again. Overlay bars occupy the existing grid
+cell without narrowing the content. Hidden overflow and scrollbar-width:none do
+not produce bars. The source DOM and scroll state remain untouched.
+
+This is an explicitly accepted approximation, not native theme replication:
+CSS does not expose native buttons, minimum thumb size, overlay thickness or fade
+state. `scrollbarFallback.js` owns the fallback dimensions; auto colors use system
+colors under the source color-scheme. An overflowing Gecko element with visible
+scrollbar CSS gets a persistent captured bar even when the OS overlay can fade.
+No raster probe is required for this path. Existing non-Gecko behavior is unchanged.
+
+Validation: run the scrollbar matrix headless, plus `BROWSER=firefox` with
+`--browser.headless=false`. Headless Gecko can force computed scrollbar-width:none;
+those geometry cases are explicitly skipped there and must pass headed. The
+Gecko tests exercise portable snapshot transport at zero/nonzero offsets, both
+axes, hidden bars, RTL and reverse flex. Native reference tests skip when the
+browser itself does not paint a reference bar. Geometry tests use fast snapshot
+serialization to avoid foreground/idle scheduling influencing their timeout.
+
+On Windows, a fixture using the actual client's desktopControls.css produced
+identical before/after PNG pixels in Chromium and WebKit. Firefox classic and
+overlay screenshots were reviewed against native images; source state remained
+unchanged and no iframe remained after capture. Ten alternating measured pairs
+(after warmup) gave Firefox classic median 24.5/26 ms and overlay 27/27.5 ms;
+Chromium 12.25/12.15 ms and WebKit 204.5/211.5 ms. These short trials describe
+capture latency and its noise, not a gameplay performance claim or certification
+of every OS, browser build, mobile device or native display scale.

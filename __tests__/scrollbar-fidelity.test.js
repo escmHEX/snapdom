@@ -5,6 +5,8 @@ import { snapshot, materializeSnapshot, serializeSnapshot, deserializeSnapshot }
 import { server } from '@vitest/browser/context'
 import { getAutomaticThumbMinimum } from '../src/modules/scrollbarMetrics.js'
 
+import { isFirefox, isSafari } from '../src/utils/browser.js'
+
 const cleanup = []
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
 
@@ -46,11 +48,12 @@ it('retains supported nested scrollbar declarations', () => {
   expect(collectScrollbarCSS(document)).toContain('@supports selector(::-webkit-scrollbar-thumb)')
 })
 
-it.each(['vertical', 'horizontal'])('matches the native minimum thumb for a very long %s scroller', async axis => {
+it.for(['vertical', 'horizontal'])('matches the native minimum thumb for a very long %s scroller', async (axis, context) => {
   if (!CSS.supports('selector(::-webkit-scrollbar-thumb)')) return
   const runnerStyle = await server.commands.normalizeScrollbarFrame()
   cleanup.push(() => server.commands.restoreScrollbarFrame(runnerStyle))
   const root = fixture()
+  if (root.firstChild.offsetWidth === root.firstChild.clientWidth) return context.skip()
   const vertical = axis === 'vertical'
   root.firstChild.firstChild.style.height = vertical ? '100000px' : '1px'
   root.firstChild.firstChild.style.width = vertical ? '1px' : '100000px'
@@ -72,7 +75,8 @@ it.each(['vertical', 'horizontal'])('matches the native minimum thumb for a very
     return rows
   }
   expect(image.width).toBe(200)
-  expect(thumbRows(native).length).toBeGreaterThan(0)
+  // Some headless engines reserve a gutter but suppress its native paint.
+  if (!thumbRows(native).length) return context.skip()
   expect(thumbRows(captured)).toEqual(thumbRows(native))
 })
 
@@ -155,4 +159,78 @@ it('places the thumb for negative column-reverse scrolling', async () => {
   const ctx = canvas.getContext('2d')
   expect([...ctx.getImageData(196, 50, 1, 1).data]).toEqual([30, 180, 70, 255])
   expect([...ctx.getImageData(196, 10, 1, 1).data]).toEqual([20, 30, 40, 255])
+})
+
+// Gecko suppresses native scrollbars in SVG images. The approved fallback keeps
+// their colors and scroll progress, not the OS-specific thumb/buttons geometry.
+it.runIf(isFirefox() && !isSafari()).for([0, 120])('reconstructs Gecko standard bars at offset %s through a portable snapshot', async (offset, context) => {
+  const runnerStyle = await server.commands.normalizeScrollbarFrame()
+  cleanup.push(() => server.commands.restoreScrollbarFrame(runnerStyle))
+  const root = fixture()
+  const scroller = root.firstChild
+  scroller.style.scrollbarWidth = 'thin'
+  scroller.style.scrollbarColor = 'rgb(30,180,70) transparent'
+  // Headless Gecko can force scrollbar-width:none regardless of author CSS.
+  if (getComputedStyle(scroller).scrollbarWidth === 'none') return context.skip()
+  scroller.firstChild.style.width = '400px'
+  scroller.firstChild.style.background = 'repeating-linear-gradient(blue 0px,blue 40px,red 40px,red 80px)'
+  scroller.scrollTop = offset
+  scroller.scrollLeft = offset
+  const before = root.outerHTML
+  const beforeScroll = [scroller.scrollLeft, scroller.scrollTop]
+  const frozen = snapshot(root); cleanup.push(() => frozen.dispose())
+  const packet = await serializeSnapshot(frozen, { fast:true }); cleanup.push(() => packet.dispose())
+  const received = await deserializeSnapshot(structuredClone(packet.payload), { fast:true }); cleanup.push(() => received.dispose())
+  const materialized = await materializeSnapshot(received, { fast:true }); cleanup.push(() => materialized.dispose())
+  const canvas = await snapdom.toCanvas(materialized.element, { scale:1, dpr:1, embedFonts:false })
+  const ctx = canvas.getContext('2d')
+  const pixel = (x,y) => [...ctx.getImageData(x,y,1,1).data].slice(0,3)
+  expect(pixel(50,10)).toEqual(offset ? [255,0,0] : [0,0,255])
+  const greenAt = (x,y) => pixel(x,y)[1] > 150 && pixel(x,y)[0] < 60
+  expect(greenAt(196, offset ? 40 : 10)).toBe(true)
+  expect(greenAt(offset ? 90 : 20,96)).toBe(true)
+  expect(greenAt(196,offset ? 10 : 70)).toBe(false)
+  expect(root.outerHTML).toBe(before)
+  expect([scroller.scrollLeft,scroller.scrollTop]).toEqual(beforeScroll)
+})
+
+it.runIf(isFirefox() && !isSafari())('does not invent bars for hidden overflow or scrollbar-width none', async () => {
+  const root = fixture()
+  const scroller = root.firstChild
+  scroller.style.scrollbarColor = 'rgb(30,180,70) transparent'
+  for (const mode of ['none', 'hidden']) {
+    scroller.style.scrollbarWidth = mode === 'none' ? 'none' : 'thin'
+    scroller.style.overflow = mode === 'hidden' ? 'hidden' : 'auto'
+    scroller.scrollTop = 120
+    const canvas = await snapdom.toCanvas(root, { scale:1,dpr:1,embedFonts:false })
+    const pixels = canvas.getContext('2d').getImageData(0,0,200,100).data
+    let green = 0
+    for (let i=0; i<pixels.length; i+=4) if (pixels[i+1]>150 && pixels[i]<60) green++
+    expect(green).toBe(0)
+  }
+})
+
+it.runIf(isFirefox() && !isSafari()).for(['rtl','column-reverse'])('keeps Gecko signed offsets for %s', async (mode, context) => {
+  const runnerStyle = await server.commands.normalizeScrollbarFrame()
+  cleanup.push(() => server.commands.restoreScrollbarFrame(runnerStyle))
+  const root = fixture(), scroller = root.firstChild
+  scroller.style.scrollbarWidth = 'thin'
+  scroller.style.scrollbarColor = 'rgb(30,180,70) transparent'
+  if (getComputedStyle(scroller).scrollbarWidth === 'none') return context.skip()
+  if (mode === 'rtl') {
+    scroller.style.direction = 'rtl'
+    scroller.firstChild.style.width = '400px'
+    scroller.scrollLeft = -80
+    scroller.scrollTop = 120
+  } else {
+    scroller.style.display = 'flex'
+    scroller.style.flexDirection = 'column-reverse'
+    scroller.firstChild.style.flexShrink = '0'
+    scroller.scrollTop = -120
+  }
+  const offset = [scroller.scrollLeft,scroller.scrollTop]
+  const canvas = await snapdom.toCanvas(root,{scale:1,dpr:1,embedFonts:false})
+  const pixel = canvas.getContext('2d').getImageData(mode === 'rtl' ? 4 : 196,mode === 'rtl' ? 40 : 55,1,1).data
+  expect(pixel[1]).toBe(180)
+  expect([scroller.scrollLeft,scroller.scrollTop]).toEqual(offset)
 })
