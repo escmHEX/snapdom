@@ -281,7 +281,8 @@ export async function prepareClone(element, options = {}) {
     // scroll — un-scrolling the root here would compensate twice (blank output when
     // capturing a scrolled documentElement).
     if (sessionCache.clip && originalNode === element) continue
-    preserveScrollLayout(cloneNode, originalNode, sessionCache.styleCache, sessionCache.nodeMap)
+    const scrollPaint = preserveScrollLayout(cloneNode, originalNode, sessionCache.styleCache, sessionCache.nodeMap, options)
+    if (scrollPaint) await scrollPaint
   }
   if (element === sessionCache.nodeMap.get(clone)) {
     const computed = sessionCache.styleCache.get(element) || getStyle(element)

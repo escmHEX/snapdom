@@ -270,3 +270,43 @@ wrapping that an emulated deviceScaleFactor:1.5 did not. Layout regressions mode
 that metric drift, and the raster root regression checks the right-edge pixels
 after root normalization. Real client validation additionally compares native
 browser screenshots with exported PNGs at native 100%, 125% and 150% scales.
+
+## Authored scrollbar fidelity
+
+Scrollbar extraction now retains nested `@supports` rules. Real scrolling clones
+retain their inherited custom properties because the emitted pseudo rules still
+contain `var()` expressions. Content-box used sizes exclude classic gutters;
+serialization restores that space once so the cloned viewport does not shrink or
+create a spurious second scrollbar.
+
+Translated scrolling content retains buttonless authored scrollbar parts in a
+separate clipped viewport and gutter grid. Paint comes from computed pseudo
+styles, with measured gutters and signed scroll offsets (including RTL and
+column-reverse). The native corner is painted by a zero-client-area scroller,
+without guessing its theme color. Automatic minimum thumb sizing is measured
+from a 102-by-102 native SVG paint once per capture, shared through the capture's
+existing style-cache lifetime. It reuses the abortable raster exporter and releases
+its canvas immediately. A native gutter measurement is insufficient: newer engines
+use a separate platform minimum. This follows the browser's custom-part sizing model:
+https://chromium.googlesource.com/chromium/src/+/refs/heads/main/third_party/blink/renderer/core/layout/layout_custom_scrollbar_part.cc
+
+This targets the client's solid, buttonless custom parts. Native OS/overlay
+scrollbars retain their previous behavior; this is not a general OS-theme
+reimplementation or certification of arbitrary scrollbar buttons, images,
+track-piece margins or platform animations. These reads and nodes belong only to
+capture processing, never acquisition, application listeners or a render loop.
+
+Run `npm run test:scrollbars` in Chromium for exported-pixel regressions: nested
+rules, inherited colors, content/border boxes, both axes, portable snapshots,
+scrolled content, RTL, reversed flow and native minimum-thumb geometry. The
+native reference removes only the Vitest runner's outer iframe scaling while
+taking the screenshot, then restores it. Edge antialiasing is separated from
+painted geometry. Also run the existing capture-fidelity acceptance suite.
+
+Validation on 2026-10-28: 11 scrollbar regressions passed in Chromium. The
+cross-engine acceptance run passed 796 tests with 14 skips; three intrinsic-width
+assertions failed in WebKit and failed identically on the unchanged a6df554 base.
+A 20-pair alternating Windows/IAB trial at DPR 1.5 measured median DOM export
+119.8 ms before and 122.6 ms after (P95 141.3/157.6 ms). This bounds this fixture's
+capture work, not gameplay FPS or performance on other hardware. The live source
+was unchanged and no renderer frames remained after the trial.

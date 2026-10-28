@@ -822,6 +822,11 @@ function* collectScrollbarRulesFromRules(rules, seen = new Set()) {
         if (inner) out += `@media ${rule.conditionText}{${inner}}`
         continue
       }
+      if (rule.type === CSSRule.SUPPORTS_RULE && rule.cssRules) {
+        const inner = yield* collectScrollbarRulesFromRules(rule.cssRules, seen)
+        if (inner) out += `@supports ${rule.conditionText}{${inner}}`
+        continue
+      }
       if (rule.type === CSSRule.STYLE_RULE) {
         const sel = rule.selectorText || ''
         if (SCROLLBAR_PSEUDO.test(sel)) {
