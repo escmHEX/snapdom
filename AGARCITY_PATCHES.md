@@ -351,3 +351,10 @@ unchanged and no iframe remained after capture. Ten alternating measured pairs
 Chromium 12.25/12.15 ms and WebKit 204.5/211.5 ms. These short trials describe
 capture latency and its noise, not a gameplay performance claim or certification
 of every OS, browser build, mobile device or native display scale.
+
+
+Independent scrollbar review: source align-items/justify-items also applied to
+capture-only grid children, collapsing or shifting their tracks for centered
+layouts. The compositor now stretches its own grid items while the original
+alignment remains on the inner content. Pixel regressions cover both alignment
+axes. This adds no DOM reads, traversal, raster probes or application runtime work.

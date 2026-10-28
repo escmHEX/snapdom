@@ -44,6 +44,9 @@ async function preserveScrollbars(clone, source, cs, inner, capture, options) {
   clone.style.gridTemplateColumns = `${source.clientWidth}px ${gutterX}px`
   clone.style.gridTemplateRows = `${source.clientHeight}px ${gutterY}px`
   clone.style.gap = '0'
+  // Source alignment belongs to inner content. The capture-only viewport and
+  // scrollbar tracks must fill their grid cells independently of that layout.
+  clone.style.placeItems = 'stretch'
   inner.style.gridArea = '1 / 1'
   // The content needs its own clip now that the outer box also paints the bars.
   const viewport = clone.ownerDocument.createElement('div')

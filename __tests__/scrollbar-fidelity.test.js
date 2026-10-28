@@ -234,3 +234,19 @@ it.runIf(isFirefox() && !isSafari()).for(['rtl','column-reverse'])('keeps Gecko 
   expect(pixel[1]).toBe(180)
   expect([scroller.scrollLeft,scroller.scrollTop]).toEqual(offset)
 })
+
+it.for(['align-items:center', 'justify-items:center'])('keeps the capture viewport independent of source %s', async (alignment, context) => {
+  const runnerStyle = await server.commands.normalizeScrollbarFrame()
+  cleanup.push(() => server.commands.restoreScrollbarFrame(runnerStyle))
+  const root = fixture(), scroller = root.firstChild
+  if (isFirefox() && !isSafari()) {
+    scroller.style.scrollbarWidth = 'thin'
+    scroller.style.scrollbarColor = 'rgb(30,180,70) transparent'
+    if (getComputedStyle(scroller).scrollbarWidth === 'none') return context.skip()
+  }
+  scroller.style.cssText += `;display:grid;${alignment}`
+  scroller.scrollTop = 120
+  const canvas = await snapdom.toCanvas(root,{scale:1,dpr:1,embedFonts:false})
+  const pixel = canvas.getContext('2d').getImageData(194,40,1,1).data
+  expect([...pixel]).toEqual([30,180,70,255])
+})
